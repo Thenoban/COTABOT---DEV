@@ -107,7 +107,27 @@ class PlayerAddModal(discord.ui.Modal, title="Oyuncu Ekle / Güncelle"):
         action = "GÜNCELLENDİ" if found else "EKLENDİ"
         await interaction.response.send_message(f"✅ Oyuncu başarıyla **{action}**!\nİsim: {p_name}\nSteamID: {s_id}", ephemeral=True)
         
-        # Now do slow operations in background
+        # HYBRID MODE: Check if using SQLite
+        cog = self.bot.get_cog("SquadPlayers")
+        if cog and hasattr(cog, 'json_mode') and hasattr(cog, 'db') and not cog.json_mode:
+            # SQLite mode - save to database instead of JSON
+            try:
+                player_exists = await cog.db.get_player_by_steam_id(s_id)
+                if player_exists:
+                    await cog.db.update_player(s_id, name=p_name, discord_id=parsed_d_id)
+                else:
+                    await cog.db.add_player(s_id, p_name, parsed_d_id)
+                
+                # Log to channel
+                await cog.log_to_channel(interaction.guild, "✏️ Oyuncu (DB)", 
+                    f"**Oyuncu:** {p_name}\n**SteamID:** `{s_id}`\n**Discord:** {parsed_d_id or '-'}", 
+                    interaction.user)
+                return  # Exit - database handled it
+            except Exception as e:
+                import logging
+                logging.getLogger("SquadPlayers").error(f"DB save error: {e}, fallback to JSON")
+        
+                # Now do slow operations in background
         cog = self.bot.get_cog("SquadPlayers")
         if cog:
             # Save to DB and auto-sync to Sheets (async background task)
@@ -223,6 +243,27 @@ class PlayerActionView(discord.ui.View):
         db_file = "squad_db.json"
         
         deleted = False
+        
+        # HYBRID MODE: Try SQLite first
+        cog = self.bot.get_cog("SquadPlayers")
+        if cog and hasattr(cog, 'json_mode') and hasattr(cog, 'db') and not cog.json_mode:
+            try:
+                # Delete from database
+                deleted = await cog.db.delete_player(s_id)
+                if deleted:
+                    
+                    # Log to channel
+                    await cog.log_to_channel(interaction.guild, "🗑️ Oyuncu Silindi (DB)", 
+                        f"**Oyuncu:** {name}\n**SteamID:** `{s_id}`", 
+                        interaction.user, color=COLORS.ERROR)
+                    
+                    await interaction.response.send_message(f"✅ **{name}** ({s_id}) başarıyla silindi (DB).", ephemeral=True)
+                    return  # Exit - database handled it
+            except Exception as e:
+                import logging
+                logging.getLogger("SquadPlayers").error(f"DB delete error: {e}, fallback to JSON")
+        
+        # JSON mode or fallback
         if os.path.exists(db_file):
             try:
                 def _delete_logic():

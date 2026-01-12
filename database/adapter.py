@@ -86,6 +86,18 @@ class DatabaseAdapter:
                 return False
         return await asyncio.to_thread(_update)
     
+
+    async def delete_player(self, steam_id: str) -> bool:
+        """Delete player by Steam ID, returns True if deleted"""
+        def _delete():
+            with self.session_scope() as session:
+                player = session.query(Player).filter_by(steam_id=steam_id).first()
+                if player:
+                    session.delete(player)
+                    return True
+                return False
+        return await asyncio.to_thread(_delete)
+    
     async def get_all_players(self) -> List[Player]:
         """Get all players"""
         def _query():
