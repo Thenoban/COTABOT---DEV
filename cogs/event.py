@@ -133,7 +133,8 @@ class EventModal(discord.ui.Modal, title="Etkinlik Oluştur"):
                 "description": self.event_desc.value,
                 "attendees": [],
                 "declined": [],
-                "tentative": []
+                "tentative": [],
+                "reminder_sent": False  # Prevent duplicate reminders on bot restart
             }
             cog.events[server_id].append(event_data)
             cog.events[server_id].append(event_data)

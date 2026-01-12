@@ -45,14 +45,20 @@ class DatabaseAdapter:
         """Get player by Steam ID"""
         def _query():
             with self.session_scope() as session:
-                return session.query(Player).filter_by(steam_id=steam_id).first()
+                player = session.query(Player).filter_by(steam_id=steam_id).first()
+                if player:
+                    session.expunge(player)  # Detach from session
+                return player
         return await asyncio.to_thread(_query)
     
     async def get_player_by_discord_id(self, discord_id: int) -> Optional[Player]:
         """Get player by Discord ID"""
         def _query():
             with self.session_scope() as session:
-                return session.query(Player).filter_by(discord_id=discord_id).first()
+                player = session.query(Player).filter_by(discord_id=discord_id).first()
+                if player:
+                    session.expunge(player)
+                return player
         return await asyncio.to_thread(_query)
     
     async def add_player(self, steam_id: str, name: str, discord_id: Optional[int] = None) -> int:
@@ -84,7 +90,9 @@ class DatabaseAdapter:
         """Get all players"""
         def _query():
             with self.session_scope() as session:
-                return session.query(Player).all()
+                players = session.query(Player).all()
+                session.expunge_all()
+                return players
         return await asyncio.to_thread(_query)
     
     # === PLAYER STATS OPERATIONS ===
@@ -124,7 +132,10 @@ class DatabaseAdapter:
         """Get player statistics"""
         def _query():
             with self.session_scope() as session:
-                return session.query(PlayerStats).filter_by(player_id=player_id).first()
+                stats = session.query(PlayerStats).filter_by(player_id=player_id).first()
+                if stats:
+                    session.expunge(stats)
+                return stats
         return await asyncio.to_thread(_query)
     
     # === ACTIVITY LOG OPERATIONS ===
@@ -158,10 +169,12 @@ class DatabaseAdapter:
             with self.session_scope() as session:
                 from datetime import timedelta
                 since = date.today() - timedelta(days=days)
-                return session.query(ActivityLog).filter(
+                logs = session.query(ActivityLog).filter(
                     ActivityLog.player_id == player_id,
                     ActivityLog.date >= since
                 ).order_by(ActivityLog.date.desc()).all()
+                session.expunge_all()
+                return logs
         return await asyncio.to_thread(_query)
     
     # === EVENT OPERATIONS ===
