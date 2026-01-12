@@ -1,0 +1,1 @@
+    embed.set_footer(text=f"Veri Kaynağı: Google Sheets • Son Güncelleme: {last_update}")

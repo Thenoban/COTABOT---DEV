@@ -1155,13 +1155,16 @@ class SquadPlayers(commands.Cog):
     
     @tasks.loop(minutes=2)
     async def activity_tracker_loop(self):
-        """Track online players every 2 minutes and update squad_activity.json"""
+        """Track online players every 2 minutes and update database"""
         try:
+            # Ensure session exists
+            if not self.session:
+                self.session = aiohttp.ClientSession(trust_env=True)
+                logger.info("Activity tracker: Created session")
+            
             # Get currently online players from BM server API
             url = f"{BM_API_URL}/servers/{SERVER_ID}"
-            params = {
-                "include": "player"
-            }
+            params = {"include": "player"}
             
             async with self.session.get(url, params=params) as resp:
                 if resp.status != 200:
@@ -1171,32 +1174,76 @@ class SquadPlayers(commands.Cog):
                 data = await resp.json()
                 included = data.get("included", [])
                 
-                # Load current activity data
-                activity_data = await self.load_activity_data()
-                
-                # Track each online player
                 tracked_count = 0
-                for item in included:
-                    if item.get("type") == "player":
-                        player_id = item.get("id")
-                        attrs = item.get("attributes", {})
-                        player_name = attrs.get("name", "Unknown")
-                        
-                        # Get SteamID from identifiers
-                        steam_id = None
-                        for ident in attrs.get("identifiers", []):
-                            if ident.get("type") == "steamID":
-                                steam_id = ident.get("identifier")
-                                break
-                        
-                        if steam_id:
-                            activity_data = await self.record_activity(steam_id, player_name, activity_data)
-                            tracked_count += 1
                 
-                # Save all changes at once
-                if tracked_count > 0:
-                    await self.save_activity_data(activity_data)
-                    logger.debug(f"Activity tracker: Recorded {tracked_count} online players")
+                if self.json_mode:
+                    # Legacy JSON mode
+                    activity_data = await self.load_activity_data()
+                    
+                    for item in included:
+                        if item.get("type") == "player":
+                            attrs = item.get("attributes", {})
+                            player_name = attrs.get("name", "Unknown")
+                            
+                            # Get SteamID from identifiers
+                            steam_id = None
+                            for ident in attrs.get("identifiers", []):
+                                if ident.get("type") == "steamID":
+                                    steam_id = ident.get("identifier")
+                                    break
+                            
+                            if steam_id:
+                                activity_data = await self.record_activity(steam_id, player_name, activity_data)
+                                tracked_count += 1
+                    
+                    if tracked_count > 0:
+                        await self.save_activity_data(activity_data)
+                        logger.info(f"Activity tracker (JSON): Recorded {tracked_count} players")
+                
+                else:
+                    # New SQLite mode
+                    from datetime import date
+                    today = date.today()
+                    now_dt = datetime.datetime.now()
+                    
+                    for item in included:
+                        if item.get("type") == "player":
+                            attrs = item.get("attributes", {})
+                            player_name = attrs.get("name", "Unknown")
+                            
+                            # Get SteamID
+                            steam_id = None
+                            for ident in attrs.get("identifiers", []):
+                                if ident.get("type") == "steamID":
+                                    steam_id = ident.get("identifier")
+                                    break
+                            
+                            if steam_id:
+                                # Get or create player
+                                player = await self.db.get_player_by_steam_id(steam_id)
+                                if not player:
+                                    # Auto-create player if not exists
+                                    player_id = await self.db.add_player(steam_id, player_name)
+                                    logger.info(f"Activity tracker: Auto-created player {player_name}")
+                                else:
+                                    player_id = player.id
+                                    # Update name if changed
+                                    if player.name != player_name:
+                                        await self.db.update_player(steam_id, name=player_name)
+                                
+                                # Record activity (2 minutes)
+                                await self.db.add_or_update_activity(
+                                    player_id=player_id,
+                                    activity_date=today,
+                                    minutes=2,
+                                    last_seen=now_dt
+                                )
+                                tracked_count += 1
+                    
+                    if tracked_count > 0:
+                        logger.info(f"Activity tracker (SQLite): Recorded {tracked_count} players")
+                    else:
+                        logger.debug("Activity tracker: No players online")
                 
         except Exception as e:
             logger.error(f"Activity tracker loop error: {e}", exc_info=True)
@@ -1839,58 +1886,101 @@ class SquadPlayers(commands.Cog):
         
         # Use existing logic? Need access to resolve_player which is inside compare but not exposed globally in class properly maybe?
         # Actually resolve_player was a helper inside compare. I should extract it or re-implement lighter version here.
-        # But wait, compare command logic was:
-        # def resolve_player(query): ... inside compare.
-        # I should probably copy that logic or make it a method. Making it a method is cleaner but risky to refactor now.
-        # I'll implement a dedicated resolver here reusing the logic, or assume 'resolve_ids' fixed everything so Member lookup is easy.
-        
-        # Load DB
-        if not os.path.exists("squad_db.json"):
-            await ctx.send("❌ Veritabanı yok.")
-            return
-
-        def _read_db():
-            with open("squad_db.json", "r", encoding="utf-8") as f: return json.load(f)
-        
-        try:
-            db_data = await asyncio.to_thread(_read_db)
-            players = db_data.get("players", [])
-        except:
-            await ctx.send("❌ DB Hatası")
-            return
-
+            # But wait, compare command logic was:
+            # I should probably copy that logic or make it a method. Making it a method is cleaner but risky to refactor now.
+            # I'll implement a dedicated resolver here reusing the logic, or assume 'resolve_ids' fixed everything so Member lookup is easy.
+            
+            # Load Player Data (Hybrid Mode)
         resolved_player = None
         
-        # Helper Resolver
-        def find_player(q):
-            # 1. By Discord ID (Member)
-            if isinstance(q, discord.Member):
-                # Match by numeric ID
-                for p in players:
-                    did = p.get("discord_id")
-                    if did and str(did) == str(q.id):
-                        return p
-                # Fallback: Match by name
-                for p in players:
-                    if p["name"].lower() == q.display_name.lower() or p["name"].lower() == q.name.lower():
-                        return p
-                return None
-            
-            # 2. By String (SteamID or Name)
-            q_str = str(q).lower().strip()
-            # SteamID
-            for p in players:
-                if p["steam_id"] == q_str: return p
-            # Name Exact
-            for p in players:
-                if p["name"].lower() == q_str: return p
-            # Name Partial
-            for p in players:
-                if q_str in p["name"].lower(): return p
-            return None
+        if self.json_mode:
+            # Legacy JSON mode
+            if not os.path.exists("squad_db.json"):
+                await ctx.send("❌ Veritabanı yok.")
+                return
 
-        resolved_player = find_player(target_query)
+            def _read_db():
+                with open("squad_db.json", "r", encoding="utf-8") as f: return json.load(f)
+            
+            try:
+                db_data = await asyncio.to_thread(_read_db)
+                players = db_data.get("players", [])
+            except:
+                await ctx.send("❌ DB Hatası")
+                return
+
+            # Helper Resolver (JSON)
+            def find_player(q):
+                # 1. By Discord ID (Member)
+                if isinstance(q, discord.Member):
+                    for p in players:
+                        did = p.get("discord_id")
+                        if did and str(did) == str(q.id):
+                            return p
+                    for p in players:
+                        if p["name"].lower() == q.display_name.lower() or p["name"].lower() == q.name.lower():
+                            return p
+                    return None
+                
+                # 2. By String (SteamID or Name)
+                q_str = str(q).lower().strip()
+                for p in players:
+                    if p["steam_id"] == q_str: return p
+                for p in players:
+                    if p["name"].lower() == q_str: return p
+                for p in players:
+                    if q_str in p["name"].lower(): return p
+                return None
+
+            resolved_player = find_player(target_query)
         
+        else:
+            # New SQLite mode
+            player_obj = None
+            
+            if isinstance(target_query, discord.Member):
+                # Look up by Discord ID
+                player_obj = await self.db.get_player_by_discord_id(target_query.id)
+                if not player_obj:
+                    # Fallback: search by name
+                    all_players = await self.db.get_all_players()
+                    for p in all_players:
+                        if p.name.lower() == target_query.display_name.lower() or p.name.lower() == target_query.name.lower():
+                            player_obj = p
+                            break
+            else:
+                # String query - try SteamID first
+                q_str = str(target_query).strip()
+                player_obj = await self.db.get_player_by_steam_id(q_str)
+                
+                if not player_obj:
+                    # Try name search
+                    all_players = await self.db.get_all_players()
+                    q_lower = q_str.lower()
+                    # Exact match
+                    for p in all_players:
+                        if p.name.lower() == q_lower:
+                            player_obj = p
+                            break
+                    # Partial match
+                    if not player_obj:
+                        for p in all_players:
+                            if q_lower in p.name.lower():
+                                player_obj = p
+                                break
+            
+            # Convert DB object to dict (backward compatibility)
+            if player_obj:
+                stats_obj = await self.db.get_player_stats(player_obj.id)
+                resolved_player = {
+                    "steam_id": player_obj.steam_id,
+                    "name": player_obj.name,
+                    "discord_id": player_obj.discord_id,
+                    "stats": json.loads(stats_obj.all_time_json) if stats_obj and stats_obj.all_time_json else {},
+                    "season_stats": json.loads(stats_obj.season_json) if stats_obj and stats_obj.season_json else {}
+                }
+
+            
         if not resolved_player:
             await ctx.send(f"❌ Oyuncu bulunamadı: **{target_query}**\n(Veritabanında kayıtlı olduğundan emin olun veya ismini doğru yazın.)")
             return
@@ -2856,41 +2946,79 @@ async def generate_activity_panel_sheets(self, activity_data):
     return embed
 
     async def generate_activity_panel_internal(self):
-        """Generate activity panel from internal tracking data"""
-        data = await self.load_activity_data()
+        """Generate activity panel from internal tracking data (hybrid mode)"""
         today = datetime.datetime.now().strftime("%Y-%m-%d")
         today_date = datetime.datetime.strptime(today, "%Y-%m-%d")
         
         stats = []
-        if data:
-            for steam_id, player_data in data.items():
-                history = player_data.get("history", {})
-                daily = history.get(today, 0)
+        
+        if self.json_mode:
+            # Legacy JSON mode
+            data = await self.load_activity_data()
+            if data:
+                for steam_id, player_data in data.items():
+                    history = player_data.get("history", {})
+                    daily = history.get(today, 0)
+                    weekly = 0
+                    monthly = 0
+                    
+                    # Calculate weekly and monthly
+                    for date_str, mins in history.items():
+                        try:
+                            d = datetime.datetime.strptime(date_str, "%Y-%m-%d")
+                            diff = (today_date - d).days
+                            if diff < 7:
+                                weekly += mins
+                            if diff < 30:
+                                monthly += mins
+                        except:
+                            pass
+                    
+                    stats.append({
+                        "name": player_data.get("name", "Unknown"),
+                        "daily": daily,
+                        "weekly": weekly,
+                        "monthly": monthly
+                    })
+        else:
+            # New SQLite mode
+            from datetime import date, timedelta
+            today_d = date.today()
+            week_ago = today_d - timedelta(days=7)
+            month_ago = today_d - timedelta(days=30)
+            
+            # Get all players
+            all_players = await self.db.get_all_players()
+            
+            for player in all_players:
+                # Get activity for last 30 days
+                activity_logs = await self.db.get_player_activity(player.id, days=30)
+                
+                daily = 0
                 weekly = 0
                 monthly = 0
                 
-                # Calculate weekly and monthly
-                for date_str, mins in history.items():
-                    try:
-                        d = datetime.datetime.strptime(date_str, "%Y-%m-%d")
-                        diff = (today_date - d).days
-                        if diff < 7:
-                            weekly += mins
-                        if diff < 30:
-                            monthly += mins
-                    except:
-                        pass
+                for log in activity_logs:
+                    if log.date == today_d:
+                        daily += log.minutes
+                    if log.date >= week_ago:
+                        weekly += log.minutes
+                    if log.date >= month_ago:
+                        monthly += log.minutes
                 
-                stats.append({
-                    "name": player_data.get("name", "Unknown"),
-                    "daily": daily,
-                    "weekly": weekly,
-                    "monthly": monthly
-                })
+                # Only include players with activity
+                if monthly > 0:
+                    stats.append({
+                        "name": player.name,
+                        "daily": daily,
+                        "weekly": weekly,
+                        "monthly": monthly
+                    })
         
         # Sort by weekly playtime
         stats.sort(key=lambda x: x["weekly"], reverse=True)
-        logger.info(f"Generated activity stats for {len(stats)} players from internal tracking")
+        mode_str = "JSON" if self.json_mode else "SQLite"
+        logger.info(f"Generated activity stats for {len(stats)} players from {mode_str}")
         return stats
 
     @commands.command(name='aktiflik_panel', aliases=['squad_activity'])
