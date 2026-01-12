@@ -126,3 +126,137 @@ class PassiveRequest(Base):
     start_date = Column(Date, nullable=False)
     end_date = Column(Date, nullable=False)
     created_at = Column(DateTime, default=datetime.utcnow)
+
+
+# ============================================
+# REPORT SYSTEM MODELS
+# ============================================
+
+class ReportSnapshot(Base):
+    """Stores player stats snapshots for period comparisons"""
+    __tablename__ = 'report_snapshots'
+    
+    id = Column(Integer, primary_key=True)
+    period_type = Column(String(20), nullable=False)  # 'weekly' or 'monthly'
+    timestamp = Column(DateTime, default=datetime.utcnow)
+    
+    # Snapshot entries (one per player)
+    entries = relationship("SnapshotEntry", back_populates="snapshot", cascade="all, delete-orphan")
+    
+    def __repr__(self):
+        return f"<ReportSnapshot(period={self.period_type}, timestamp={self.timestamp})>"
+
+
+
+class SnapshotEntry(Base):
+    """Individual player entry in a snapshot"""
+    __tablename__ = 'snapshot_entries'
+    
+    id = Column(Integer, primary_key=True)
+    snapshot_id = Column(Integer, ForeignKey('report_snapshots.id'), nullable=False)
+    steam_id = Column(String(50), nullable=False)
+    
+    # Stats at snapshot time
+    score = Column(Integer, default=0)
+    kills = Column(Integer, default=0)
+    deaths = Column(Integer, default=0)
+    revives = Column(Integer, default=0)
+    wounds = Column(Integer, default=0)
+    kd_ratio = Column(Float, default=0.0)
+    
+    # Relationship
+    snapshot = relationship("ReportSnapshot", back_populates="entries")
+    
+    def __repr__(self):
+        return f"<SnapshotEntry(steam_id={self.steam_id}, score={self.score})>"
+
+
+
+class ReportDelta(Base):
+    """Stores calculated deltas between snapshots"""
+    __tablename__ = 'report_deltas'
+    
+    id = Column(Integer, primary_key=True)
+    period_type = Column(String(20), nullable=False)
+    timestamp = Column(DateTime, default=datetime.utcnow)
+    
+    # Before/After snapshots
+    start_snapshot_id = Column(Integer, ForeignKey('report_snapshots.id'))
+    end_snapshot_id = Column(Integer, ForeignKey('report_snapshots.id'))
+    
+    # Delta entries
+    entries = relationship("DeltaEntry", back_populates="delta", cascade="all, delete-orphan")
+    
+    # Relationships
+    start_snapshot = relationship("ReportSnapshot", foreign_keys=[start_snapshot_id])
+    end_snapshot = relationship("ReportSnapshot", foreign_keys=[end_snapshot_id])
+    
+    def __repr__(self):
+        return f"<ReportDelta(period={self.period_type}, timestamp={self.timestamp})>"
+
+
+
+class DeltaEntry(Base):
+    """Individual player delta in a report"""
+    __tablename__ = 'delta_entries'
+    
+    id = Column(Integer, primary_key=True)
+    delta_id = Column(Integer, ForeignKey('report_deltas.id'), nullable=False)
+    steam_id = Column(String(50), nullable=False)
+    player_name = Column(String(100))
+    
+    # Deltas
+    score_delta = Column(Integer, default=0)
+    kills_delta = Column(Integer, default=0)
+    deaths_delta = Column(Integer, default=0)
+    revives_delta = Column(Integer, default=0)
+    wounds_delta = Column(Integer, default=0)
+    
+    # Rankings
+    rank = Column(Integer)
+    
+    # Relationship
+    delta = relationship("ReportDelta", back_populates="entries")
+    
+    def __repr__(self):
+        return f"<DeltaEntry(player={self.player_name}, score_delta={self.score_delta})>"
+
+
+
+class ReportMetadata(Base):
+    """Stores report system metadata (last run times, etc)"""
+    __tablename__ = 'report_metadata'
+    
+    key = Column(String(50), primary_key=True)
+    value = Column(Text)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    def __repr__(self):
+        return f"<ReportMetadata(key={self.key}, value={self.value})>"
+
+
+
+class HallOfFameRecord(Base):
+    """Stores hall of fame records"""
+    __tablename__ = 'hall_of_fame'
+    
+    id = Column(Integer, primary_key=True)
+    record_type = Column(String(50), nullable=False)  # e.g. 'highest_weekly_score'
+    steam_id = Column(String(50), nullable=False)
+    player_name = Column(String(100))
+    value = Column(Float, nullable=False)
+    achieved_at = Column(DateTime, default=datetime.utcnow)
+    
+    def __repr__(self):
+        return f"<HallOfFameRecord(type={self.record_type}, player={self.player_name}, value={self.value})>"
+
+
+print("Report system schema defined!")
+print("\nTables:")
+print("  - report_snapshots: Periodic snapshots of player stats")
+print("  - snapshot_entries: Individual player stats in snapshots")
+print("  - report_deltas: Calculated changes between periods")
+print("  - delta_entries: Individual player deltas")
+print("  - report_metadata: System metadata (last run times)")
+print("  - hall_of_fame: Record achievements")
+

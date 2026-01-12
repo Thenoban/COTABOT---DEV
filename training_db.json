@@ -1,0 +1,361 @@
+{
+  "matches": [
+    {
+      "match_id": "1",
+      "server_ip": "84.200.135.219:7789",
+      "map": "Test",
+      "start_time": "2026-01-12T18:10:59.200445",
+      "end_time": "2026-01-12T18:12:00.622806",
+      "status": "completed",
+      "snapshot_start": null,
+      "snapshot_end": null,
+      "players": []
+    },
+    {
+      "match_id": "2",
+      "server_ip": "84.200.135.219:7789",
+      "map": "Test1",
+      "start_time": "2026-01-12T18:13:18.782570",
+      "end_time": "2026-01-12T18:13:35.416225",
+      "status": "completed",
+      "snapshot_start": null,
+      "snapshot_end": null,
+      "players": [
+        {
+          "name": "testplayer",
+          "steam_id": "unknown",
+          "kills_delta": null,
+          "deaths_delta": null,
+          "kills_manual": 31,
+          "deaths_manual": 1,
+          "assists_manual": 1,
+          "final_kills": 31,
+          "final_deaths": 1,
+          "final_assists": 1,
+          "kd_ratio": 31.0,
+          "data_source": "manual"
+        }
+      ]
+    },
+    {
+      "match_id": "3",
+      "server_ip": "84.200.135.219:7789",
+      "map": "HarjuTrainingMATCH1LIVE",
+      "start_time": "2026-01-12T18:18:31.785148",
+      "end_time": "2026-01-12T19:22:37.770811",
+      "status": "completed",
+      "snapshot_start": null,
+      "snapshot_end": null,
+      "players": []
+    },
+    {
+      "match_id": "4",
+      "server_ip": "84.200.135.219:7789",
+      "map": "HarjuTrainingMATCH2LIVE",
+      "start_time": "2026-01-12T19:36:37.584123",
+      "end_time": "2026-01-12T20:12:11.268547",
+      "status": "completed",
+      "snapshot_start": {
+        "timestamp": "2026-01-12T19:36:38.494211",
+        "server_id": "24580202",
+        "players": [
+          {
+            "steam_id": "76561198360292514",
+            "name": " Calosa",
+            "battlemetrics_id": "939426023"
+          },
+          {
+            "steam_id": "76561198370120720",
+            "name": " WHO IS DIGGY",
+            "battlemetrics_id": "473882355"
+          },
+          {
+            "steam_id": "76561198263506056",
+            "name": " Dimacchi",
+            "battlemetrics_id": "344737557"
+          },
+          {
+            "steam_id": "76561198195232287",
+            "name": "『COTA』 Têrminate",
+            "battlemetrics_id": "926352749"
+          },
+          {
+            "steam_id": "76561198263073735",
+            "name": " Benett0n",
+            "battlemetrics_id": "900095100"
+          },
+          {
+            "steam_id": "76561198366126958",
+            "name": "『COTA』 aygitsobig",
+            "battlemetrics_id": "822345089"
+          },
+          {
+            "steam_id": "76561198857432083",
+            "name": " YotaNI",
+            "battlemetrics_id": "1166527530"
+          },
+          {
+            "steam_id": "76561199040591126",
+            "name": " Franz Ferdinand",
+            "battlemetrics_id": "1178671605"
+          },
+          {
+            "steam_id": "76561199181074015",
+            "name": " SERDOGAN",
+            "battlemetrics_id": "1158149682"
+          },
+          {
+            "steam_id": "76561198339936523",
+            "name": " S T A I N",
+            "battlemetrics_id": "1192149277"
+          },
+          {
+            "steam_id": "76561198283858165",
+            "name": "『COTAr』 İlyas Yıldırım",
+            "battlemetrics_id": "40782526"
+          },
+          {
+            "steam_id": "76561198277597395",
+            "name": "『COTAr』 kelt_kreqht",
+            "battlemetrics_id": "973004922"
+          },
+          {
+            "steam_id": "76561198357739918",
+            "name": "『COTAr』 Merlin",
+            "battlemetrics_id": "1186172155"
+          },
+          {
+            "steam_id": "76561198366482056",
+            "name": " [$DARK$]",
+            "battlemetrics_id": "1125260050"
+          },
+          {
+            "steam_id": "76561199014250930",
+            "name": " Myro",
+            "battlemetrics_id": "1103433006"
+          },
+          {
+            "steam_id": "76561198057608150",
+            "name": "『COTA』 Pablo",
+            "battlemetrics_id": "162580942"
+          },
+          {
+            "steam_id": "76561198862112847",
+            "name": "『COTA』 ✪KATiL✪",
+            "battlemetrics_id": "944368010"
+          },
+          {
+            "steam_id": "76561199093227664",
+            "name": " mekkeli musrik",
+            "battlemetrics_id": "1113715190"
+          },
+          {
+            "steam_id": "76561199086025634",
+            "name": "『COTAr』 _belali_",
+            "battlemetrics_id": "1146076123"
+          },
+          {
+            "steam_id": "76561198980310805",
+            "name": " FlaveX",
+            "battlemetrics_id": "944793547"
+          },
+          {
+            "steam_id": "76561198800749901",
+            "name": " Mannerheim [HoV]",
+            "battlemetrics_id": "1005841693"
+          },
+          {
+            "steam_id": "76561198203872867",
+            "name": " anarchos",
+            "battlemetrics_id": "940047518"
+          },
+          {
+            "steam_id": "76561198810937193",
+            "name": " Mano",
+            "battlemetrics_id": "953427467"
+          },
+          {
+            "steam_id": "76561198838706688",
+            "name": "『COTA』 NemesisTR37",
+            "battlemetrics_id": "917328931"
+          },
+          {
+            "steam_id": "76561199487904831",
+            "name": "『COTAr』 Lorien",
+            "battlemetrics_id": "1185410563"
+          },
+          {
+            "steam_id": "76561199380425474",
+            "name": "『COTAr』 nesqu",
+            "battlemetrics_id": "1115509541"
+          },
+          {
+            "steam_id": "76561198348193056",
+            "name": " SpeedY MadiC",
+            "battlemetrics_id": "412725339"
+          },
+          {
+            "steam_id": "76561198257979976",
+            "name": "『COTA』 Literary",
+            "battlemetrics_id": "457287468"
+          },
+          {
+            "steam_id": "76561199439240177",
+            "name": "『COTA』 EmirBeg",
+            "battlemetrics_id": "1120031586"
+          },
+          {
+            "steam_id": "76561198131073456",
+            "name": "『COTAr』 FizzRombie",
+            "battlemetrics_id": "86985308"
+          },
+          {
+            "steam_id": "76561198399718605",
+            "name": "『COTA』 SickStick",
+            "battlemetrics_id": "457251883"
+          },
+          {
+            "steam_id": "76561198974850674",
+            "name": "『COTA』 CanWick",
+            "battlemetrics_id": "932851186"
+          }
+        ]
+      },
+      "snapshot_end": {
+        "timestamp": "2026-01-12T20:12:12.337109",
+        "server_id": "24580202",
+        "players": [
+          {
+            "steam_id": "76561198360292514",
+            "name": " Calosa",
+            "battlemetrics_id": "939426023"
+          },
+          {
+            "steam_id": "76561198370120720",
+            "name": " WHO IS DIGGY",
+            "battlemetrics_id": "473882355"
+          },
+          {
+            "steam_id": "76561198263506056",
+            "name": " Dimacchi",
+            "battlemetrics_id": "344737557"
+          },
+          {
+            "steam_id": "76561198263073735",
+            "name": " Benett0n",
+            "battlemetrics_id": "900095100"
+          },
+          {
+            "steam_id": "76561198366126958",
+            "name": "『COTA』 aygitsobig",
+            "battlemetrics_id": "822345089"
+          },
+          {
+            "steam_id": "76561198857432083",
+            "name": " YotaNI",
+            "battlemetrics_id": "1166527530"
+          },
+          {
+            "steam_id": "76561199040591126",
+            "name": " Franz Ferdinand",
+            "battlemetrics_id": "1178671605"
+          },
+          {
+            "steam_id": "76561199181074015",
+            "name": " SERDOGAN",
+            "battlemetrics_id": "1158149682"
+          },
+          {
+            "steam_id": "76561198339936523",
+            "name": " S T A I N",
+            "battlemetrics_id": "1192149277"
+          },
+          {
+            "steam_id": "76561198283858165",
+            "name": "『COTAr』 İlyas Yıldırım",
+            "battlemetrics_id": "40782526"
+          },
+          {
+            "steam_id": "76561198277597395",
+            "name": "『COTAr』 kelt_kreqht",
+            "battlemetrics_id": "973004922"
+          },
+          {
+            "steam_id": "76561198057608150",
+            "name": "『COTA』 Pablo",
+            "battlemetrics_id": "162580942"
+          },
+          {
+            "steam_id": "76561199093227664",
+            "name": " mekkeli musrik",
+            "battlemetrics_id": "1113715190"
+          },
+          {
+            "steam_id": "76561199086025634",
+            "name": "『COTAr』 _belali_",
+            "battlemetrics_id": "1146076123"
+          },
+          {
+            "steam_id": "76561198980310805",
+            "name": " FlaveX",
+            "battlemetrics_id": "944793547"
+          },
+          {
+            "steam_id": "76561198203872867",
+            "name": " anarchos",
+            "battlemetrics_id": "940047518"
+          },
+          {
+            "steam_id": "76561198810937193",
+            "name": " Mano",
+            "battlemetrics_id": "953427467"
+          },
+          {
+            "steam_id": "76561198838706688",
+            "name": "『COTA』 NemesisTR37",
+            "battlemetrics_id": "917328931"
+          },
+          {
+            "steam_id": "76561199487904831",
+            "name": "『COTAr』 Lorien",
+            "battlemetrics_id": "1185410563"
+          },
+          {
+            "steam_id": "76561199380425474",
+            "name": "『COTAr』 nesqu",
+            "battlemetrics_id": "1115509541"
+          },
+          {
+            "steam_id": "76561198348193056",
+            "name": " SpeedY MadiC",
+            "battlemetrics_id": "412725339"
+          },
+          {
+            "steam_id": "76561199439240177",
+            "name": "『COTA』 EmirBeg",
+            "battlemetrics_id": "1120031586"
+          },
+          {
+            "steam_id": "76561198131073456",
+            "name": "『COTAr』 FizzRombie",
+            "battlemetrics_id": "86985308"
+          },
+          {
+            "steam_id": "76561198399718605",
+            "name": "『COTA』 SickStick",
+            "battlemetrics_id": "457251883"
+          },
+          {
+            "steam_id": "76561198974850674",
+            "name": "『COTA』 CanWick",
+            "battlemetrics_id": "932851186"
+          }
+        ]
+      },
+      "players": []
+    }
+  ],
+  "config": {
+    "next_match_id": 5
+  }
+}

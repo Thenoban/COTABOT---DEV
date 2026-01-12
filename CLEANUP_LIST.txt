@@ -1,0 +1,60 @@
+# CLEANUP - Manual File List
+# Copy these commands to delete unnecessary files
+
+# ========================================
+# FILES TO DELETE (26 total)
+# ========================================
+
+# Migration Scripts (6 files)
+migrate_db_indir.py
+migrate_delete.py
+migrate_player_add.py
+migrate_report_logic.py
+migrate_search.py
+migrate_stats_sync.py
+
+# Fix Scripts (13 files)
+fix_action_message.py
+fix_adapter.py
+fix_chart.py
+fix_datetime.py
+fix_detached.py
+fix_dropdown_cache.py
+fix_event.py
+fix_indent.py
+fix_old_events.py
+fix_panel_count.py
+fix_player_hybrid.py
+fix_search_final.py
+fix_select_view.py
+
+# Add/Generate Scripts (4 files)
+add_adapter_report_methods.py
+add_delete_method.py
+add_report_models.py
+generate_report_methods.py
+
+# Create Scripts (2 files)
+create_chart_maker.py
+create_report_tables.py
+
+# Database redundant file (1 file)
+database/report_models.py
+
+# ========================================
+# FILES TO ARCHIVE (2 files)
+# ========================================
+# Move to migration_archive/ folder:
+final_migration_batch.py
+complete_final_migration.py
+
+# ========================================
+# FILES TO KEEP (3 files)
+# ========================================
+check_db.py
+test_snapshot.py
+check_keys.py
+
+# ========================================
+# CLEANUP COMPLETE!
+# ========================================

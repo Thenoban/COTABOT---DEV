@@ -33,6 +33,11 @@ BM_API_URL = "https://api.battlemetrics.com"
 SERVER_ID = "19262595"
 BM_API_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ0b2tlbiI6ImZkNjFiNGUwNDg3NGVhOWMiLCJpYXQiOjE3Njc3ODQxMjMsIm5iZiI6MTc2Nzc4NDEyMywiaXNzIjoiaHR0cHM6Ly93d3cuYmF0dGxlbWV0cmljcy5jb20iLCJzdWIiOiJ1cm46dXNlcjoxMDUzOTEzIn0.jZ78RBn-O0_njNeGIJZlVrWXk5ptMdQ8bIFBgEsfmzw"
 
+# Training Server Configuration (84.200.135.219:7789)
+TRAINING_SERVER_IP = "84.200.135.219:7789"
+TRAINING_SERVER_ID = "24580202"  # BattleMetrics Server ID - Delta hesaplama aktif
+
+
 
 # Google Sheets Config
 # DEVELOPMENT MODE: Sheet sync disabled to protect production data

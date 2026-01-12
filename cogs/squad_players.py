@@ -1150,8 +1150,36 @@ class SquadPlayers(commands.Cog):
             
             await asyncio.sleep(1.0) 
 
-        # 3. SAVE - Auto-sync to Sheets
+        # 3. SAVE - Database (hybrid mode) + Auto-sync to Sheets
         if db_data:
+            # HYBRID MODE: Save to database
+            if hasattr(self, 'json_mode') and hasattr(self, 'db') and not self.json_mode:
+                try:
+                    for p_info in db_data:
+                        steam_id = p_info["steam_id"]
+                        name = p_info["name"]
+                        discord_id = p_info.get("discord_id")
+                        
+                        # Get or create player
+                        player = await self.db.get_player_by_steam_id(steam_id)
+                        if player:
+                            await self.db.update_player(steam_id, name=name, discord_id=discord_id)
+                            player_id = player.id
+                        else:
+                            player_id = await self.db.add_player(steam_id, name, discord_id)
+                        
+                        # Save stats
+                        if p_info.get("stats") or p_info.get("season_stats"):
+                            await self.db.add_or_update_stats(
+                                player_id,
+                                p_info.get("stats", {}),
+                                p_info.get("season_stats", {})
+                            )
+                    logger.info(f"Stats sync: Saved {len(db_data)} players to database")
+                except Exception as e:
+                    logger.error(f"Database save error in sync: {e}, falling back to JSON")
+            
+            # JSON mode or fallback
             final_data = {
                 "last_update": str(datetime.datetime.now()),
                 "players": db_data
@@ -1333,6 +1361,36 @@ class SquadPlayers(commands.Cog):
     async def before_activity_tracker(self):
         await self.bot.wait_until_ready()
 
+
+    async def _get_all_players_hybrid(self):
+        """Get all players from database or JSON (hybrid mode)"""
+        if hasattr(self, 'json_mode') and hasattr(self, 'db') and not self.json_mode:
+            try:
+                all_players = await self.db.get_all_players()
+                result = []
+                for p in all_players:
+                    stats_obj = await self.db.get_player_stats(p.id)
+                    player_dict = {
+                        "steam_id": p.steam_id,
+                        "name": p.name,
+                        "discord_id": p.discord_id,
+                        "stats": json.loads(stats_obj.all_time_json) if stats_obj and stats_obj.all_time_json else {},
+                        "season_stats": json.loads(stats_obj.season_json) if stats_obj and stats_obj.season_json else {}
+                    }
+                    result.append(player_dict)
+                return result
+            except Exception as e:
+                logger.error(f"Database player fetch error: {e}")
+        
+        # JSON fallback
+        if os.path.exists("squad_db.json"):
+            def _read():
+                with open("squad_db.json", "r", encoding="utf-8") as f:
+                    return json.load(f)
+            data = await asyncio.to_thread(_read)
+            return data.get("players", [])
+        return []
+
     @commands.command(name='squad_sync')
     async def squad_sync(self, ctx):
         """Google Sheet ile veritabanını manuel senkronize eder."""
@@ -1404,21 +1462,17 @@ class SquadPlayers(commands.Cog):
     @commands.command(name='squad_season')
     async def squad_season(self, ctx):
         if not await self.check_permissions(ctx): return
-        if not os.path.exists("squad_db.json"):
-            await ctx.send("⚠️ Veritabanı yok. !1squad_sync çalıştırın.")
-            return
-            
-        def _read_db():
-             with open("squad_db.json", "r", encoding="utf-8") as f: return json.load(f)
         
+        # HYBRID: Use helper to get players from database or JSON
         async def refresh_data():
             """Refresh callback for squad_season"""
-            data = await asyncio.to_thread(_read_db)
-            season_players = [p for p in data.get("players", []) if p.get("season_stats")]
+            players = await self._get_all_players_hybrid()
+            season_players = [p for p in players if p.get("season_stats")]
             return sorted(season_players, key=lambda x: x["season_stats"].get("totalScore", 0), reverse=True) if season_players else []
         
-        data = await asyncio.to_thread(_read_db)
-        season_players = [p for p in data.get("players", []) if p.get("season_stats")]
+        players = await self._get_all_players_hybrid()
+        season_players = [p for p in players if p.get("season_stats")]
+        
         if not season_players:
              await ctx.send("📭 Sezon verisi bulunamadı.")
              return
@@ -1784,7 +1838,20 @@ class SquadPlayers(commands.Cog):
                     db_data["players"].append(new_p)
                     imported_count += 1
             
-            # Save
+            # Save to database (HYBRID MODE)
+            if hasattr(self, 'json_mode') and hasattr(self, 'db') and not self.json_mode:
+                try:
+                    for s_id, p_data in existing_map.items():
+                        player_exists = await self.db.get_player_by_steam_id(s_id)
+                        if player_exists:
+                            await self.db.update_player(s_id, name=p_data["name"], discord_id=p_data.get("discord_id"))
+                        else:
+                            await self.db.add_player(s_id, p_data["name"], p_data.get("discord_id"))
+                    logger.info(f"Sheets import: Saved {len(existing_map)} players to database")
+                except Exception as e:
+                    logger.error(f"DB save error in import: {e}")
+            
+            # JSON save (fallback or json_mode)
             db_data["last_update"] = str(datetime.datetime.now())
             def _save_db():
                 with open("squad_db.json", "w", encoding="utf-8") as f:
@@ -2220,14 +2287,26 @@ class SquadPlayers(commands.Cog):
         with open("squad_reports.json", "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=4)
 
-    def _take_snapshot(self, period="weekly"):
+    async def _take_snapshot(self, period="weekly"):
         """
-        Takes a snapshot of current stats for delta calculation.
-        Strategies:
-        - 'weekly_start': Snapshot taken at start of week.
-        - 'monthly_start': Snapshot taken at start of month.
+        Takes a snapshot of current stats for delta calculation (DATABASE VERSION)
         """
-        # Read Current DB
+        # HYBRID: Use database if available
+        if hasattr(self, 'json_mode') and hasattr(self, 'db') and not self.json_mode:
+            try:
+                # Create snapshot in database
+                snapshot_id = await self.db.create_snapshot(period)
+                
+                # Store metadata
+                await self.db.set_report_metadata(f"last_{period}", str(datetime.datetime.now()))
+                await self.db.set_report_metadata(f"last_{period}_snapshot_id", str(snapshot_id))
+                
+                logger.info(f"Created {period} snapshot in database (ID: {snapshot_id})")
+                return True
+            except Exception as e:
+                logger.error(f"Database snapshot error: {e}, falling back to JSON")
+        
+        # JSON FALLBACK - Original logic
         if not os.path.exists("squad_db.json"): return False
         with open("squad_db.json", "r", encoding="utf-8") as f:
             current_db = json.load(f)
@@ -2235,7 +2314,7 @@ class SquadPlayers(commands.Cog):
         snapshot = {}
         for p in current_db.get("players", []):
             sid = p.get("steam_id")
-            stats = p.get("stats", {}) # Uses All Time stats
+            stats = p.get("stats", {})
             if sid and stats:
                 snapshot[sid] = {
                     "score": stats.get("totalScore", 0),
@@ -2246,29 +2325,43 @@ class SquadPlayers(commands.Cog):
                     "kd": stats.get("totalKdRatio", 0)
                 }
         
-        # Save to Report DB
         report_data = self._get_report_db()
-        
-        # Structure: snapshots > weekly > {timestamp: ..., data: ...}
         if "snapshots" not in report_data: report_data["snapshots"] = {}
-        
         report_data["snapshots"][period] = {
             "timestamp": str(datetime.datetime.now()),
             "data": snapshot
         }
-        
-        # Also store 'last_run' meta
         if "meta" not in report_data: report_data["meta"] = {}
         report_data["meta"][f"last_{period}"] = str(datetime.datetime.now())
-        
         self._save_report_db(report_data)
         return True
 
-    def _calculate_deltas(self, period="weekly"):
+    async def _calculate_deltas(self, period="weekly"):
         """
-        Compares Current DB vs Snapshot[period].
+        Compares Current DB vs Snapshot[period] (DATABASE VERSION)
         Returns list of player_delta objects.
         """
+        # HYBRID: Use database if available
+        if hasattr(self, 'json_mode') and hasattr(self, 'db') and not self.json_mode:
+            try:
+                # Get latest snapshot ID
+                snapshot_id_str = await self.db.get_report_metadata(f"last_{period}_snapshot_id")
+                if not snapshot_id_str:
+                    logger.warning(f"No snapshot found for {period}")
+                    return []
+                
+                snapshot_id = int(snapshot_id_str)
+                
+                # Calculate deltas from snapshot to current
+                deltas = await self.db.calculate_deltas(snapshot_id)
+                
+                logger.info(f"Calculated {len(deltas)} deltas for {period} from database")
+                return deltas
+                
+            except Exception as e:
+                logger.error(f"Database delta calculation error: {e}, falling back to JSON")
+        
+        # JSON FALLBACK
         if not os.path.exists("squad_db.json"): return []
         with open("squad_db.json", "r", encoding="utf-8") as f:
             current_db = json.load(f)
