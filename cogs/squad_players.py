@@ -13,6 +13,12 @@ from .utils.chart_maker import generate_activity_image, generate_profile_card
 from .utils.pagination import PaginationView
 from .utils.cache import TTLCache
 
+# Database adapter for SQLite migration
+import sys
+import os
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from database.adapter import DatabaseAdapter
+
 logger = logging.getLogger("SquadPlayers")
 
 try:
@@ -482,6 +488,15 @@ class SquadPlayers(commands.Cog):
         self.activity_config_file = "activity_panel.json"
         self.ACTIVITY_FILE = "squad_activity.json"
         self.cache = TTLCache(max_size=500)  # Initialize cache
+        
+        # Database adapter for SQLite migration
+        self.db = DatabaseAdapter('sqlite:///cotabot_dev.db')
+        self.db.init_db()  # Ensure tables exist
+        
+        # Hybrid mode: False = use DB, True = use JSON (legacy)
+        self.json_mode = False  # Set to True to fallback to JSON
+        logger.info(f"SquadPlayers initialized - Mode: {'JSON' if self.json_mode else 'SQLite'}")
+        
         # Loops auto-start via @tasks.loop decorator
 
     @tasks.loop(hours=1)
