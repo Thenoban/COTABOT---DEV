@@ -1,0 +1,30 @@
+FROM alpine:latest AS builder
+
+# Install build dependencies
+RUN apk add --no-cache curl make g++ linux-headers
+
+# Download and build ByeDPI (ciadpi)
+WORKDIR /src
+RUN curl -L https://github.com/hufrea/byedpi/archive/refs/heads/main.tar.gz | tar xz --strip-components=1
+RUN make
+
+# Runtime stage
+FROM alpine:latest
+WORKDIR /app
+
+# Install diagnostic tools
+RUN apk add --no-cache curl bind-tools
+
+# Copy the compiled binary
+COPY --from=builder /src/ciadpi /usr/local/bin/ciadpi
+
+# Expose the proxy port
+EXPOSE 8080
+
+# Start ByeDPI with optimized arguments for Turkey (Profile: varsayilan2)
+# --ip 0.0.0.0: Listen on all interfaces
+# --port 8080: Port
+# --http-connect: Enable HTTP CONNECT proxying
+# --oob 1: Send Out-Of-Band data
+# --auto=torst,redirect,ssl_err: Automatically detect block/reset and retry with different params
+ENTRYPOINT ["ciadpi", "--ip", "0.0.0.0", "--port", "8080", "--http-connect", "--oob", "1", "--auto=torst,redirect,ssl_err"]

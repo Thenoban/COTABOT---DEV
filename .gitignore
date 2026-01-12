@@ -1,0 +1,89 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Environment variables
+.env
+.env.local
+
+# Logs
+*.log
+bot.log
+squad_debug.log
+panel_debug.log
+boot_log.txt
+
+# Database files (sensitive data)
+*.db
+*.db-journal
+*.sqlite
+*.sqlite3
+
+# JSON data files (contain sensitive user data)
+squad_db.json
+squad_activity.json
+events.json
+event_history.json
+passive_db.json
+voice_stats.json
+squad_reports.json
+squad_panel.json
+activity_panel.json
+passive_config.json
+squad_activity_panel.json
+
+# Google credentials
+service_account.json
+*.json.key
+
+# Backup files
+backups/
+*.bak
+*.backup
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Docker
+*.db
+docker-compose.override.yml
+
+# Test coverage
+.coverage
+htmlcov/
+.pytest_cache/
+
+# Temporary files
+temp_functions.txt
+append_functions.txt
+*.tmp

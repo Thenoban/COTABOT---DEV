@@ -1,0 +1,28 @@
+services:
+  cotabot-dev:
+    build: .
+    container_name: cotabot-dev
+    restart: always
+    environment:
+      - PYTHONUNBUFFERED=1
+      - http_proxy=http://proxy-dev:1080
+      - https_proxy=http://proxy-dev:1080
+      - HTTP_PROXY=http://proxy-dev:1080
+      - HTTPS_PROXY=http://proxy-dev:1080
+    env_file:
+      - .env
+    volumes:
+      - ./:/app
+    depends_on:
+      - proxy-dev
+
+  proxy-dev:
+    image: caomingjun/warp:latest
+    container_name: cotabot-proxy-dev
+    restart: always
+    environment:
+      - GOST_ARGS=-L :1080
+    cap_add:
+      - NET_ADMIN
+    ports:
+      - "127.0.0.1:1081:1080" # Dev proxy on port 1081

@@ -1,0 +1,10 @@
+discord.py[voice]>=2.0.0
+python-dotenv
+aiohttp
+gspread
+google-auth
+matplotlib
+pandas
+openpyxl
+reportlab
+sqlalchemy>=2.0.0
