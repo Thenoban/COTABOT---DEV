@@ -103,17 +103,31 @@ class PlayerAddModal(discord.ui.Modal, title="Oyuncu Ekle / Güncelle"):
             with open("squad_debug.log", "a", encoding="utf-8") as f: f.write(log_msg + "\n")
         except: pass
 
+        # HYBRID MODE: Check database FIRST to determine correct action
+        cog = self.bot.get_cog("SquadPlayers")
+        player_exists_in_db = False
+        
+        if cog and hasattr(cog, 'json_mode') and hasattr(cog, 'db') and not cog.json_mode:
+            try:
+                existing_player = await cog.db.get_player_by_steam_id(s_id)
+                player_exists_in_db = bool(existing_player)
+            except:
+                pass
+        
+        # Determine action based on database check (SQLite) or JSON (fallback)
+        if cog and hasattr(cog, 'json_mode') and not cog.json_mode:
+            action = "GÜNCELLENDİ" if player_exists_in_db else "EKLENDİ"
+        else:
+            action = "GÜNCELLENDİ" if found else "EKLENDİ"
+        
         # CRITICAL: Respond to interaction FIRST (before slow sync)
-        action = "GÜNCELLENDİ" if found else "EKLENDİ"
         await interaction.response.send_message(f"✅ Oyuncu başarıyla **{action}**!\nİsim: {p_name}\nSteamID: {s_id}", ephemeral=True)
         
-        # HYBRID MODE: Check if using SQLite
-        cog = self.bot.get_cog("SquadPlayers")
+        # HYBRID MODE: Save to database
         if cog and hasattr(cog, 'json_mode') and hasattr(cog, 'db') and not cog.json_mode:
             # SQLite mode - save to database instead of JSON
             try:
-                player_exists = await cog.db.get_player_by_steam_id(s_id)
-                if player_exists:
+                if player_exists_in_db:
                     await cog.db.update_player(s_id, name=p_name, discord_id=parsed_d_id)
                 else:
                     await cog.db.add_player(s_id, p_name, parsed_d_id)
@@ -160,8 +174,25 @@ class PlayerSearchModal(discord.ui.Modal, title="Oyuncu Ara"):
     async def on_submit(self, interaction: discord.Interaction):
         query = self.name_query.value.lower()
         
+        # HYBRID MODE: Search in database or JSON
+        cog = self.bot.get_cog("SquadPlayers")
         matches = []
-        if os.path.exists("squad_db.json"):
+        
+        if cog and hasattr(cog, 'json_mode') and hasattr(cog, 'db') and not cog.json_mode:
+            # SQLite mode
+            try:
+                all_players = await cog.db.get_all_players()
+                matches = [{
+                    "steam_id": p.steam_id,
+                    "name": p.name,
+                    "discord_id": p.discord_id
+                } for p in all_players if query in p.name.lower()]
+            except Exception as e:
+                import logging
+                logging.getLogger("SquadPlayers").error(f"DB search error: {e}")
+        
+        # JSON fallback
+        if not matches and os.path.exists("squad_db.json"):
             try:
                 def _read_search():
                     with open("squad_db.json", "r", encoding="utf-8") as f:
@@ -182,24 +213,33 @@ class PlayerSelectView(discord.ui.View):
     def __init__(self, bot, players):
         super().__init__(timeout=180)
         self.bot = bot
+        self.players = players  # Store for later use
         options = []
         for p in players:
             label = p['name'][:100]
             desc = f"SID: {p['steam_id']}"
             options.append(discord.SelectOption(label=label, description=desc, value=p['steam_id']))
         
-        self.add_item(PlayerSelectDropdown(bot, options))
+        self.add_item(PlayerSelectDropdown(bot, options, players))
 
 class PlayerSelectDropdown(discord.ui.Select):
-    def __init__(self, bot, options):
+    def __init__(self, bot, options, players):
         self.bot = bot
+        self.players = players  # Store player data
         super().__init__(placeholder="Bir oyuncu seçin...", min_values=1, max_values=1, options=options)
 
     async def callback(self, interaction: discord.Interaction):
         steam_id = self.values[0]
         
+        # Use cached player data
         target_player = None
-        if os.path.exists("squad_db.json"):
+        for p in self.players:
+            if p.get("steam_id") == steam_id:
+                target_player = p
+                break
+        
+        # JSON fallback if not found
+        if not target_player and os.path.exists("squad_db.json"):
             try:
                 def _find_player():
                     with open("squad_db.json", "r", encoding="utf-8") as f:
@@ -1610,7 +1650,19 @@ class SquadPlayers(commands.Cog):
         
         total_players = 0
         last_update = "Bilinmiyor"
-        if os.path.exists("squad_db.json"):
+        
+        # HYBRID MODE: Count from database or JSON
+        if hasattr(self, 'json_mode') and hasattr(self, 'db') and not self.json_mode:
+            try:
+                all_players = await self.db.get_all_players()
+                total_players = len(all_players)
+                # Get last update from database (could track in a metadata table)
+                last_update = datetime.datetime.now().strftime("%d.%m.%Y %H:%M")
+            except Exception as e:
+                logger.error(f"DB count error: {e}")
+        
+        # JSON fallback
+        if total_players == 0 and os.path.exists("squad_db.json"):
              try:
                  def _read_db():
                      with open("squad_db.json", "r", encoding="utf-8") as f: return json.load(f)

@@ -1,0 +1,27 @@
+﻿{
+    "1132891696825385012":  [
+                                {
+                                    "event_id":  1,
+                                    "message_id":  1458937363312021535,
+                                    "channel_id":  1458402315265511454,
+                                    "author_id":  305072157170466816,
+                                    "title":  "deneme1",
+                                    "timestamp":  "2026-01-09T00:56:00+03:00",
+                                    "end_timestamp":  "2026-01-09T02:00:00+03:00",
+                                    "description":  "deneme",
+                                    "attendees":  [
+                                                      "\u003c@305072157170466816\u003e"
+                                                  ],
+                                    "declined":  [
+
+                                                 ],
+                                    "tentative":  [
+
+                                                  ],
+                                    "interaction_reason_map":  {
+
+                                                               },
+                                    "reminder_sent":  false
+                                }
+                            ]
+}
