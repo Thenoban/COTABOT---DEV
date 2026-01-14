@@ -260,3 +260,55 @@ print("  - delta_entries: Individual player deltas")
 print("  - report_metadata: System metadata (last run times)")
 print("  - hall_of_fame: Record achievements")
 
+
+
+# ============================================
+# TRAINING MATCHES MODELS
+# ============================================
+
+class TrainingMatch(Base):
+    """Training match records"""
+    __tablename__ = 'training_matches'
+    
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    match_id = Column(String(20), unique=True, nullable=False, index=True)
+    server_ip = Column(String(50))
+    map_name = Column(String(100))
+    start_time = Column(DateTime, nullable=False)
+    end_time = Column(DateTime)
+    status = Column(String(20), default='active')
+    snapshot_start_json = Column(Text)
+    snapshot_end_json = Column(Text)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    
+    players = relationship("TrainingPlayer", back_populates="match", cascade="all, delete-orphan")
+    
+    def __repr__(self):
+        return f"<TrainingMatch(id={self.match_id}, map={self.map_name})>"
+
+
+class TrainingPlayer(Base):
+    """Player participation in training match"""
+    __tablename__ = 'training_players'
+    
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    match_id = Column(Integer, ForeignKey('training_matches.id'), nullable=False, index=True)
+    steam_id = Column(String(20))
+    name = Column(String(100))
+    kills_manual = Column(Integer)
+    deaths_manual = Column(Integer)
+    assists_manual = Column(Integer)
+    final_kills = Column(Integer, default=0)
+    final_deaths = Column(Integer, default=0)
+    final_assists = Column(Integer, default=0)
+    kd_ratio = Column(Float, default=0.0)
+    data_source = Column(String(20))
+    
+    match = relationship("TrainingMatch", back_populates="players")
+    
+    __table_args__ = (
+        UniqueConstraint('match_id', 'steam_id', name='_match_player_uc'),
+    )
+    
+    def __repr__(self):
+        return f"<TrainingPlayer(name={self.name})>"

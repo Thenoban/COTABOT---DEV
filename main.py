@@ -9,19 +9,17 @@ import asyncio
 import aiohttp
 import datetime
 
-# Logging setup
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] %(name)s: %(message)s',
-    handlers=[
-        logging.FileHandler("bot.log", encoding='utf-8'),
-        logging.StreamHandler(sys.stdout)
-    ]
-)
+# Load environment variables first
+load_dotenv()
+
+# Logging setup with rotation (NEW - IMPROVED)
+from config.logging_config import setup_logging
+setup_logging()
+
 logger = logging.getLogger("Main")
 
-load_dotenv()
 TOKEN = os.getenv('DISCORD_TOKEN')
+
 
 
 # Intents setup

@@ -5,13 +5,19 @@ import os
 import datetime
 import asyncio
 
-# Dosya yolları
+# Database import
+from database.adapter import DatabaseAdapter
+
+# Dosya yolları (deprecated - using database now)
 EVENTS_FILE = "events.json"
 HISTORY_FILE = "event_history.json"
 
 # Auth Constants
 from .utils.config import ADMIN_USER_IDS, ADMIN_ROLE_IDS, CLAN_MEMBER_ROLE_IDS, COLORS, DEV_MODE, MANAGER_USER_IDS, MANAGER_ROLE_IDS
 import logging
+
+# Import custom exceptions
+from exceptions import DiscordOperationError, DataError, JSONParseError
 
 logger = logging.getLogger("Event")
 
@@ -107,40 +113,48 @@ class EventModal(discord.ui.Modal, title="Etkinlik Oluştur"):
         view = EventView() # Persistent view
         msg = await self.target_channel.send(embed=embed, view=view)
         
-        # Veritabanına kaydet
+        # Database'e kaydet
         cog = self.bot.get_cog("Event")
         if cog:
-            server_id = str(interaction.guild.id)
-            if server_id not in cog.events:
-                cog.events[server_id] = []
+            guild_id = interaction.guild.id
+            server_id = str(guild_id)
             
-            # Yeni Event ID Oluştur
-            current_ids = [e.get("event_id", 0) for e in cog.events[server_id]]
-            new_event_id = (max(current_ids) if current_ids else 0) + 1
+            # Get next event_id from database (not from memory!)
+            # Query database for max event_id for this guild
+            def get_max_event_id():
+                with cog.db.session_scope() as session:
+                    from database.models import Event as EventModel
+                    max_id = session.query(EventModel.event_id).filter_by(
+                        guild_id=guild_id
+                    ).order_by(EventModel.event_id.desc()).first()
+                    return max_id[0] if max_id else 0
             
-            # Footer Güncelle
+            import asyncio
+            max_event_id = await asyncio.to_thread(get_max_event_id)
+            new_event_id = max_event_id + 1
+            
+            # Add event to database
+            event_db_id = await cog.db.add_event(
+                guild_id=guild_id,
+                event_id=new_event_id,
+                title=self.event_title.value,
+                description=self.event_desc.value or "",
+                timestamp=local_time,
+                channel_id=self.target_channel.id,
+                creator_id=interaction.user.id
+            )
+            
+            # Update message_id in database
+            await cog.db.update_event_message(event_db_id, msg.id)
+            
+            # Update embed footer
             embed.set_footer(text=f"Cotabot Event System | ID: {new_event_id}")
             await msg.edit(embed=embed)
 
-            event_data = {
-                "event_id": new_event_id,
-                "message_id": msg.id,
-                "channel_id": self.target_channel.id,
-                "author_id": interaction.user.id,
-                "title": self.event_title.value,
-                "timestamp": local_time.isoformat(),
-                "end_timestamp": local_end_time.isoformat() if local_end_time else None,
-                "description": self.event_desc.value,
-                "attendees": [],
-                "declined": [],
-                "tentative": [],
-                "reminder_sent": False  # Prevent duplicate reminders on bot restart
-            }
-            cog.events[server_id].append(event_data)
-            cog.events[server_id].append(event_data)
-            await cog.save_events()
+            # Reload events from database to sync memory
+            cog.events = await cog.load_events_from_db()
             
-            # Log at
+            # Log
             log_channel = discord.utils.get(interaction.guild.text_channels, name="etkinlik-log")
             if log_channel:
                  await log_channel.send(f"📢 **Yeni Etkinlik (#{new_event_id}):** {self.event_title.value} - {msg.jump_url}")
@@ -338,19 +352,31 @@ class EventView(discord.ui.View):
         cog = interaction.client.get_cog("Event")
         if cog:
             server_id = str(interaction.guild.id)
+            guild_id = interaction.guild.id
+            
+            # Find event in database by message_id
+            event_dict = None
             if server_id in cog.events:
-                found = False
                 for event in cog.events[server_id]:
                     if event["message_id"] == interaction.message.id:
-                        event["attendees"] = attendees
-                        event["declined"] = declined
-                        event["tentative"] = tentative
-                        event["interaction_reason_map"] = event.get("interaction_reason_map", {})
-                        if reason and status == "decline":
-                             event["interaction_reason_map"][user_mention] = reason
-                        found = True
+                        event_dict = event
                         break
-                if found: await cog.save_events()
+            
+            if event_dict:
+                # Update participants in database
+                # Extract user_id from mention
+                user_id = interaction.user.id
+                
+                await cog.db.add_event_participant(
+                    event_db_id=event_dict.get("db_id"),  # We need to store this
+                    user_id=user_id,
+                    user_mention=user_mention,
+                    status=status if status != "join" else "attendee",
+                    reason=reason
+                )
+                
+                # Reload events from database
+                cog.events = await cog.load_events_from_db()
 
         await self.log_action(interaction, action_text)
 
@@ -368,7 +394,8 @@ class EventView(discord.ui.View):
                             if target_name in ch.name:
                                 mazeret_channel = ch
                                 break
-                except Exception as e: print(f"Kanal fetch hatası: {e}")
+                except DiscordOperationError as e:
+                    logger.warning(f"Kanal fetch hatası: {e}")
 
             if mazeret_channel:
                 try:
@@ -379,9 +406,11 @@ class EventView(discord.ui.View):
                     log_embed.add_field(name="Mazeret", value=reason, inline=False)
                     log_embed.set_footer(text=f"Tarih: {datetime.datetime.now().strftime('%d.%m.%Y %H:%M')}")
                     await mazeret_channel.send(embed=log_embed)
-                except Exception as e:
-                    try: await interaction.followup.send(f"⚠️ Mazeret loglanamadı: {e}", ephemeral=True)
-                    except: pass
+                except DiscordOperationError as e:
+                    try:
+                        await interaction.followup.send(f"⚠️ Mazeret loglanamadı: {e}", ephemeral=True)
+                    except:
+                        pass
             else:
                  try: await interaction.followup.send("⚠️ 'oyuncu-mazeret' kanalı bulunamadı.", ephemeral=True)
                  except: pass
@@ -436,6 +465,7 @@ class EventView(discord.ui.View):
 
         current_title = found_event.get("title", "") if found_event else ""
         current_time_str = ""
+        current_end_time_str = ""  # Initialize here
         try:
             dt = datetime.datetime.fromisoformat(found_event.get("timestamp"))
             current_time_str = dt.strftime("%d.%m.%Y %H:%M")
@@ -504,7 +534,7 @@ class EventView(discord.ui.View):
         # Try to delete message (after response sent)
         try:
             await interaction.message.delete()
-        except Exception as e:
+        except DiscordOperationError as e:
             # Message deletion failed, but event is already removed from list
             logger.warning(f"Could not delete event message: {e}")
 
@@ -716,11 +746,17 @@ class EventListView(discord.ui.View):
 class Event(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+        self.db = DatabaseAdapter('sqlite:///cotabot_dev.db')
+        # Initialize db tables
+        self.db.init_db()
+        # Keep events dict for backward compatibility with views
+        self.events = {}
+        self.history = {}
+        
     async def cog_load(self):
-        self.events = await self.load_events()
-        self.history = await self.load_history()
-        self.events = await self.load_events()
-        self.history = await self.load_history()
+        # Load events from database instead of JSON
+        self.events = await self.load_events_from_db()
+        self.history = {}  # History not loaded in memory anymore
         self.check_events_task.start()
         self.check_reminders.start()
 
@@ -728,33 +764,75 @@ class Event(commands.Cog):
         self.check_events_task.cancel()
         self.check_reminders.cancel()
 
-    async def load_events(self):
-        if not os.path.exists(EVENTS_FILE): return {}
+    async def load_events_from_db(self):
+        """Load all active events from database and organize by guild_id"""
         try:
-            return await asyncio.to_thread(self._read_json, EVENTS_FILE)
-        except Exception as e:
-             logger.error(f"Load Events Error: {e}")
-             return {}
-
-    async def save_events(self):
-        await asyncio.to_thread(self._write_json, EVENTS_FILE, self.events)
+            # Get all guilds that bot is in
+            events_dict = {}
+            for guild in self.bot.guilds:
+                guild_id_str = str(guild.id)
+                active_events = await self.db.get_active_events(guild.id)
+                
+                if active_events:
+                    events_list = []
+                    for event in active_events:
+                        # Convert database event to dict format for compatibility
+                        event_dict = {
+                            "db_id": event.id,  # ADD THIS - database primary key
+                            "event_id": event.event_id,
+                            "message_id": event.message_id,
+                            "channel_id": event.channel_id,
+                            "author_id": event.creator_id,
+                            "title": event.title,
+                            "timestamp": event.timestamp.isoformat() if event.timestamp else "",
+                            "description": event.description or "",
+                            "attendees": [],
+                            "declined": [],
+                            "tentative": [],
+                            "reminder_sent": event.reminder_sent,
+                            "active": event.active
+                        }
+                        
+                        # Load participants
+                        if event.participants:
+                            for p in event.participants:
+                                if p.status == "attendee":
+                                    event_dict["attendees"].append(p.user_mention)
+                                elif p.status == "declined":
+                                    event_dict["declined"].append(p.user_mention)
+                                elif p.status == "tentative":
+                                    event_dict["tentative"].append(p.user_mention)
+                        
+                        events_list.append(event_dict)
+                    
+                    events_dict[guild_id_str] = events_list
+                    logger.info(f"Loaded {len(events_list)} events for guild {guild_id_str}")
             
-    async def load_history(self):
-        if not os.path.exists(HISTORY_FILE): return {}
-        try:
-            return await asyncio.to_thread(self._read_json, HISTORY_FILE)
+            return events_dict
         except Exception as e:
-            logger.error(f"Load History Error: {e}")
+            logger.error(f"Error loading events from database: {e}", exc_info=True)
             return {}
 
+    async def save_events(self):
+        """Deprecated - events are saved directly to database now"""
+        logger.warning("save_events() called but events are now saved directly to database")
+        pass
+            
+    async def load_history(self):
+        """Deprecated - history in database"""
+        return {}
+
     async def save_history(self):
-        await asyncio.to_thread(self._write_json, HISTORY_FILE, self.history)
+        """Deprecated - history in database"""
+        pass
 
     def _read_json(self, filename):
+        """Deprecated - using database"""
         with open(filename, 'r', encoding='utf-8') as f: return json.load(f)
 
     def _write_json(self, filename, data):
-         with open(filename, 'w', encoding='utf-8') as f:
+        """Deprecated - using database"""
+        with open(filename, 'w', encoding='utf-8') as f:
             json.dump(data, f, ensure_ascii=False, indent=4)
 
     async def archive_event(self, event, guild):

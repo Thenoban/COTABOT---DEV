@@ -10,6 +10,9 @@ import logging
 
 from .utils.config import ADMIN_USER_IDS, ADMIN_ROLE_IDS, BM_API_URL, BM_API_KEY, COLORS
 
+# Import custom exceptions
+from exceptions import APIError, BattleMetricsAPIError, DataError, JSONParseError
+
 logger = logging.getLogger("TrainingMatches")
 
 
@@ -60,8 +63,8 @@ class TrainingMatches(commands.Cog):
         try:
             with open(self.training_db_file, "r", encoding="utf-8") as f:
                 return json.load(f)
-        except Exception as e:
-            logger.error(f"Error loading training DB: {e}")
+        except (DataError, JSONParseError) as e:
+            logger.error(f"Error loading training DB: {e}", exc_info=True)
             return {"matches": [], "config": {"next_match_id": 1}}
     
     def save_training_db(self, data: dict):
@@ -69,8 +72,8 @@ class TrainingMatches(commands.Cog):
         try:
             with open(self.training_db_file, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
-        except Exception as e:
-            logger.error(f"Error saving training DB: {e}")
+        except (DataError, JSONParseError) as e:
+            logger.error(f"Error saving training DB: {e}", exc_info=True)
     
     async def fetch_battlemetrics_snapshot(self, server_id: str) -> Optional[Dict]:
         """
@@ -130,8 +133,8 @@ class TrainingMatches(commands.Cog):
                 logger.info(f"Snapshot captured: {len(snapshot['players'])} players")
                 return snapshot
                 
-        except Exception as e:
-            logger.error(f"Error fetching BattleMetrics snapshot: {e}")
+        except BattleMetricsAPIError as e:
+            logger.error(f"Error fetching BattleMetrics snapshot: {e}", exc_info=True)
             return None
     
     async def fetch_player_stats(self, steam_id: str) -> Optional[Dict]:
@@ -159,8 +162,8 @@ class TrainingMatches(commands.Cog):
             
             return None
             
-        except Exception as e:
-            logger.error(f"Error fetching player stats for {steam_id}: {e}")
+        except (DataError, JSONParseError) as e:
+            logger.error(f"Error fetching player stats for {steam_id}: {e}", exc_info=True)
             return None
     
     async def find_steam_id_by_name(self, player_name: str) -> Optional[str]:
@@ -193,8 +196,8 @@ class TrainingMatches(commands.Cog):
             logger.debug(f"No Steam ID found for player {player_name}")
             return None
             
-        except Exception as e:
-            logger.error(f"Error finding Steam ID for {player_name}: {e}")
+        except (DataError, JSONParseError) as e:
+            logger.error(f"Error finding Steam ID for {player_name}: {e}", exc_info=True)
             return None
     
     async def calculate_delta(self, match: dict) -> bool:
@@ -258,7 +261,7 @@ class TrainingMatches(commands.Cog):
             logger.info(f"Delta placeholder created for {len(players_to_add)} players (manual KDA entry needed)")
             return True
             
-        except Exception as e:
+        except APIError as e:
             logger.error(f"Error calculating delta: {e}", exc_info=True)
             return False
     

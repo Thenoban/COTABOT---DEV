@@ -21,15 +21,6 @@ from database.adapter import DatabaseAdapter
 
 logger = logging.getLogger("SquadPlayers")
 
-# Import new modularized components
-from .squad.modals import PlayerAddModal, PlayerSearchModal
-from .squad.views import (
-    PlayerSelectView, PlayerSelectDropdown, PlayerActionView,
-    PlayerManageView, SquadLeaderboardView, ActivityManageView
-)
-from .squad.sheets_sync import GoogleSheetsSync
-from .squad.reports import ReportSystem
-
 try:
     import gspread
     from google.oauth2.service_account import Credentials
@@ -386,70 +377,10 @@ class PlayerManageView(discord.ui.View):
         if not interaction.user.guild_permissions.administrator:
              await interaction.response.send_message("❌ Sadece yöneticiler indirebilir.", ephemeral=True)
              return
-        
-        # Export from database instead of JSON file
-        cog = self.bot.get_cog("SquadPlayers")
-        if cog and hasattr(cog, 'db'):
-            try:
-                await interaction.response.defer(ephemeral=True)
-                
-                # Get all players from database
-                players = await cog.db.get_all_players()
-                
-                # Create JSON export
-                export_data = {
-                    "players": [],
-                    "exported_at": datetime.datetime.now().isoformat(),
-                    "source": "database"
-                }
-                
-                for p in players:
-                    player_dict = {
-                        "steam_id": p.steam_id,
-                        "name": p.name,
-                        "discord_id": p.discord_id,
-                        "stats": {},
-                        "season_stats": {}
-                    }
-                    
-                    # Get stats
-                    if p.stats:
-                        player_dict["stats"] = {
-                            "totalScore": p.stats.total_score,
-                            "totalKills": p.stats.total_kills,
-                            "totalDeaths": p.stats.total_deaths,
-                            "totalRevives": p.stats.total_revives,
-                            "totalKdRatio": p.stats.total_kd_ratio
-                        }
-                        player_dict["season_stats"] = {
-                            "seasonScore": p.stats.season_score,
-                            "seasonKills": p.stats.season_kills,
-                            "seasonDeaths": p.stats.season_deaths,
-                            "seasonRevives": p.stats.season_revives,
-                            "seasonKdRatio": p.stats.season_kd_ratio
-                        }
-                    
-                    export_data["players"].append(player_dict)
-                
-                # Write to temporary file
-                import tempfile
-                with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.json', encoding='utf-8') as f:
-                    json.dump(export_data, f, ensure_ascii=False, indent=4)
-                    temp_path = f.name
-                
-                await interaction.followup.send(
-                    f"✅ Database export: {len(export_data['players'])} oyuncu",
-                    file=discord.File(temp_path, filename="squad_db_export.json"),
-                    ephemeral=True
-                )
-                
-                # Clean up temp file
-                os.unlink(temp_path)
-                
-            except Exception as e:
-                await interaction.followup.send(f"❌ Export hatası: {e}", ephemeral=True)
+        if os.path.exists("squad_db.json"):
+            await interaction.response.send_message(file=discord.File("squad_db.json"), ephemeral=True)
         else:
-            await interaction.response.send_message("❌ Database adapter bulunamadı.", ephemeral=True)
+            await interaction.response.send_message("❌ Veritabanı dosyası yok.", ephemeral=True)
 
 class SquadLeaderboardView(PaginationView):
     def __init__(self, players, mode="AllTime", refresh_callback=None):
@@ -647,16 +578,7 @@ class SquadPlayers(commands.Cog):
         self.json_mode = False  # Set to True to fallback to JSON
         logger.info(f"SquadPlayers initialized - Mode: {'JSON' if self.json_mode else 'SQLite'}")
         
-        # Initialize helper systems (NEW - REFACTORED)
-        self.sheets_sync = GoogleSheetsSync(GOOGLE_SHEET_KEY)
-        self.report_system = ReportSystem(bot, db=self.db, json_mode=self.json_mode)
-        
-        # Start automated report loop
-        self.report_system.automated_report_loop.start()
-        logger.info("Helper systems initialized: GoogleSheetsSync, ReportSystem")
-        
         # Loops auto-start via @tasks.loop decorator
-
 
     @tasks.loop(hours=1)
     async def automated_report_loop(self):

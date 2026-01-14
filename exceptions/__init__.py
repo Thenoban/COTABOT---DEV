@@ -1,0 +1,36 @@
+# Exceptions package
+from .cotabot_exceptions import (
+    CotabotError,
+    DatabaseError,
+    PlayerNotFoundError,
+    DatabaseConnectionError,
+    DatabaseOperationError,
+    APIError,
+    BattleMetricsAPIError,
+    GoogleSheetsAPIError,
+    ConfigError,
+    MissingConfigError,
+    DiscordOperationError,
+    ValidationError,
+    InvalidSteamIDError,
+    DataError,
+    JSONParseError,
+)
+
+__all__ = [
+    'CotabotError',
+    'DatabaseError',
+    'PlayerNotFoundError',
+    'DatabaseConnectionError',
+    'DatabaseOperationError',
+    'APIError',
+    'BattleMetricsAPIError',
+    'GoogleSheetsAPIError',
+    'ConfigError',
+    'MissingConfigError',
+    'DiscordOperationError',
+    'ValidationError',
+    'InvalidSteamIDError',
+    'DataError',
+    'JSONParseError',
+]
