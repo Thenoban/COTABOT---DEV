@@ -1,10 +1,17 @@
 
-import matplotlib.pyplot as plt
-import pandas as pd
+try:
+    import matplotlib.pyplot as plt
+    import pandas as pd
+    
+    # Fix for Headless Environments (Docker/Linux)
+    plt.switch_backend('Agg')
+    print("ChartMaker: Matplotlib/Pandas imported successfully.")
+    HAS_MATPLOTLIB = True
+except ImportError as e:
+    print(f"ChartMaker: Matplotlib/Pandas IMPORT FAILED: {e}")
+    HAS_MATPLOTLIB = False
+    
 import io
-
-# Fix for Headless Environments (Docker/Linux)
-plt.switch_backend('Agg')
 
 def generate_activity_image(stats_list):
     """

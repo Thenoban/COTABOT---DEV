@@ -4,7 +4,13 @@ import json
 import os
 import datetime
 import asyncio
+import logging
 from .utils.config import ADMIN_USER_IDS, ADMIN_ROLE_IDS, COLORS
+
+# Database import
+from database.adapter import DatabaseAdapter
+
+logger = logging.getLogger("Passive")
 
 class PassiveRequestModal(discord.ui.Modal, title="Pasiflik Bildirimi"):
     def __init__(self, bot, channel_id):
@@ -32,29 +38,32 @@ class PassiveRequestModal(discord.ui.Modal, title="Pasiflik Bildirimi"):
     )
 
     async def on_submit(self, interaction: discord.Interaction):
-        # Save to DB
-        db_file = "passive_db.json"
-        entry = {
-            "user_id": interaction.user.id,
-            "user_name": interaction.user.display_name,
-            "reason": self.reason.value,
-            "start_date": self.start_date.value,
-            "end_date": self.end_date.value,
-            "timestamp": str(datetime.datetime.now())
-        }
+        # Parse dates
+        try:
+            start_day, start_month, start_year = map(int, self.start_date.value.split('.'))
+            end_day, end_month, end_year = map(int, self.end_date.value.split('.'))
+            start_date_obj = datetime.date(start_year, start_month, start_day)
+            end_date_obj = datetime.date(end_year, end_month, end_day)
+        except ValueError:
+            await interaction.response.send_message("❌ Hatalı tarih formatı! GG.AA.YYYY formatında giriniz.", ephemeral=True)
+            return
         
-        data = {"requests": []}
-        if os.path.exists(db_file):
+        # Save to database
+        passive_cog = self.bot.get_cog('Passive')
+        if passive_cog and hasattr(passive_cog, 'db'):
             try:
-                with open(db_file, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-            except: pass
-            
-        if "requests" not in data: data["requests"] = []
-        data["requests"].append(entry)
-        
-        with open(db_file, "w", encoding="utf-8") as f:
-            json.dump(data, f, ensure_ascii=False, indent=4)
+                await passive_cog.db.add_passive_request(
+                    user_id=interaction.user.id,
+                    user_name=interaction.user.display_name,
+                    reason=self.reason.value,
+                    start_date=start_date_obj,
+                    end_date=end_date_obj
+                )
+                logger.info(f"Passive request added for {interaction.user.display_name}")
+            except Exception as e:
+                logger.error(f"Database error: {e}")
+                await interaction.response.send_message(f"❌ Kayıt hatası: {e}", ephemeral=True)
+                return
 
         # Notify Channel (Ephemeral) and Trigger Panel
         
@@ -96,39 +105,34 @@ class PassivePanelView(discord.ui.View):
 
     @discord.ui.button(label="🗑️ Bildirim Sil", style=discord.ButtonStyle.danger, custom_id="pp_delete_form")
     async def delete_passive_form_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
-        # Check if DB exists
-        db_file = "passive_db.json"
-        if not os.path.exists(db_file):
-                await interaction.response.send_message("❌ Henüz hiç kayıt yok.", ephemeral=True)
-                return
-
-        # Load and Filter Requests
-        user_requests = []
-        is_admin = False
-        
         # Check Admin
+        is_admin = False
         if interaction.user.guild_permissions.administrator or interaction.user.id in ADMIN_USER_IDS:
             is_admin = True
         else:
-                for r in interaction.user.roles:
-                    if r.id in ADMIN_ROLE_IDS: is_admin = True; break
+            for r in interaction.user.roles:
+                if r.id in ADMIN_ROLE_IDS: is_admin = True; break
         
-        try:
-            with open(db_file, "r", encoding="utf-8") as f:
-                db = json.load(f)
+        # Load from database
+        passive_cog = self.bot.get_cog('Passive')
+        user_requests = []
+        
+        if passive_cog and hasattr(passive_cog, 'db'):
+            try:
+                all_requests = await passive_cog.db.get_all_passive_requests()
                 
-            today = datetime.datetime.now().date()
-            
-            for req in db.get("requests", []):
-                    # Basic Filter for list
+                for req in all_requests:
                     show = False
                     if is_admin: show = True
-                    elif req.get("user_id") == interaction.user.id: show = True
+                    elif req.user_id == interaction.user.id: show = True
                     
                     if show:
                         user_requests.append(req)
                         
-        except: pass
+            except Exception as e:
+                logger.error(f"Database error: {e}")
+                await interaction.response.send_message(f"❌ Veritabanı hatası: {e}", ephemeral=True)
+                return
         
         if not user_requests:
             await interaction.response.send_message("❌ Silebileceğiniz bir bildirim bulunamadı.", ephemeral=True)
@@ -149,37 +153,37 @@ class PassiveDeleteSelect(discord.ui.Select):
     def __init__(self, bot, requests):
         options = []
         for req in requests:
-            ts = req.get("timestamp", "")
-            u_name = req.get("user_name", "Bilinmiyor")
-            reason = req.get("reason", "")[:20]
+            # req is now a PassiveRequest model object
+            req_id = str(req.id)
+            u_name = req.user_name or "Bilinmiyor"
+            reason = req.reason[:20] if req.reason else ""
+            
+            start_str = req.start_date.strftime("%d.%m.%Y")
+            end_str = req.end_date.strftime("%d.%m.%Y")
             
             lbl = f"{u_name} - {reason}..."
-            desc = f"Tarih: {req.get('start_date')} - {req.get('end_date')}"
+            desc = f"Tarih: {start_str} - {end_str}"
             
-            options.append(discord.SelectOption(label=lbl, description=desc, value=ts))
+            options.append(discord.SelectOption(label=lbl, description=desc, value=req_id))
             
         super().__init__(placeholder="Silinecek kaydı seçin...", min_values=1, max_values=1, options=options)
         self.bot = bot
 
     async def callback(self, interaction: discord.Interaction):
-        selected_ts = self.values[0]
-        db_file = "passive_db.json"
+        request_id = int(self.values[0])
         deleted = False
         
-        if os.path.exists(db_file):
+        # Delete from database
+        passive_cog = self.bot.get_cog('Passive')
+        if passive_cog and hasattr(passive_cog, 'db'):
             try:
-                with open(db_file, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                
-                initial_len = len(data.get("requests", []))
-                # Remove by timestamp match
-                data["requests"] = [r for r in data["requests"] if r.get("timestamp") != selected_ts]
-                
-                if len(data["requests"]) < initial_len:
-                    with open(db_file, "w", encoding="utf-8") as f:
-                        json.dump(data, f, ensure_ascii=False, indent=4)
-                    deleted = True
-            except: pass
+                deleted = await passive_cog.db.delete_passive_request(request_id)
+                if deleted:
+                    logger.info(f"Passive request {request_id} deleted")
+            except Exception as e:
+                logger.error(f"Database delete error: {e}")
+                await interaction.response.send_message(f"❌ Silme hatası: {e}", ephemeral=True)
+                return
             
         if deleted:
             await interaction.response.send_message("✅ Bildirim silindi.", ephemeral=True)
@@ -194,6 +198,10 @@ class PassiveDeleteSelect(discord.ui.Select):
 class Passive(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
+        # Database adapter
+        self.db = DatabaseAdapter('sqlite:///cotabot_dev.db')
+        self.db.init_db()
+        logger.info("Passive cog initialized with database")
 
     async def check_permissions(self, ctx):
         if ctx.author.guild_permissions.administrator: return True
@@ -225,26 +233,12 @@ class Passive(commands.Cog):
             
         if not channel_id: return
 
-        # Load Requests
+        # Load Requests from database
         active_requests = []
-        if os.path.exists(db_file):
-            try:
-                with open(db_file, "r", encoding="utf-8") as f:
-                    db = json.load(f)
-                    today = datetime.datetime.now().date()
-                    
-                    for req in db.get("requests", []):
-                        # Filter Expired
-                        try:
-                            end_date_str = req.get("end_date", "")
-                            day, month, year = map(int, end_date_str.split('.'))
-                            end_date_obj = datetime.date(year, month, day)
-                            
-                            if end_date_obj >= today:
-                                active_requests.append(req)
-                        except:
-                            active_requests.append(req)
-            except: pass
+        try:
+            active_requests = await self.db.get_active_passive_requests()
+        except Exception as e:
+            logger.error(f"Database error loading requests: {e}")
 
         # Create Embed
         embed = discord.Embed(title="💤 Pasiflik Listesi", description="Aşağıda mazereti geçerli olan oyuncuların listesi bulunmaktadır.", color=discord.Color(COLORS.INFO))
@@ -253,18 +247,14 @@ class Passive(commands.Cog):
         if active_requests:
             desc_lines = []
             for req in active_requests:
-                user_name = req.get('user_name', 'Bilinmiyor')
-                reason = req.get('reason', '-')
-                start_str = req.get('start_date')
-                end_str = req.get('end_date')
+                user_name = req.user_name or 'Bilinmiyor'
+                reason = req.reason or '-'
+                start_str = req.start_date.strftime("%d.%m.%Y")
+                end_str = req.end_date.strftime("%d.%m.%Y")
                 
                 duration_str = ""
                 try:
-                    s_d, s_m, s_y = map(int, start_str.split('.'))
-                    e_d, e_m, e_y = map(int, end_str.split('.'))
-                    dt_start = datetime.date(s_y, s_m, s_d)
-                    dt_end = datetime.date(e_y, e_m, e_d)
-                    days = (dt_end - dt_start).days + 1
+                    days = (req.end_date - req.start_date).days + 1
                     duration_str = f" **({days} Gün)**"
                 except: pass
                 

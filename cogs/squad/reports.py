@@ -127,7 +127,23 @@ class ReportSystem:
                 snapshot_id = int(snapshot_id_str)
                 
                 # Calculate deltas from snapshot to current
-                deltas = await self.db.calculate_deltas(snapshot_id)
+                db_deltas = await self.db.calculate_deltas(snapshot_id)
+                
+                # Normalize keys for compatibility with reports.py logic
+                deltas = []
+                for d in db_deltas:
+                    d_norm = d.copy()
+                    d_norm['score'] = d.get('score_delta', 0)
+                    d_norm['kills'] = d.get('kills_delta', 0)
+                    d_norm['deaths'] = d.get('deaths_delta', 0)
+                    d_norm['revives'] = d.get('revives_delta', 0)
+                    # d_norm['wounds'] missing in DB calculator? optional
+                    d_norm['name'] = d.get('player_name', 'Unknown')
+                    # KD calc if not present
+                    k = d_norm['kills']
+                    d_val = d_norm['deaths']
+                    d_norm['kd'] = k / d_val if d_val > 0 else k
+                    deltas.append(d_norm)
                 
                 logger.info(f"Calculated {len(deltas)} deltas for {period} from database")
                 return deltas
@@ -334,6 +350,17 @@ class ReportSystem:
         report_db = self._get_report_db()
         meta = report_db.get("meta", {})
         
+        # Load metadata from DB if available
+        if self.db and not self.json_mode:
+            try:
+                last_w = await self.db.get_report_metadata("last_weekly")
+                if last_w: meta["last_weekly"] = last_w
+                
+                last_m = await self.db.get_report_metadata("last_monthly")
+                if last_m: meta["last_monthly"] = last_m
+            except:
+                pass
+        
         # --- WEEKLY REPORT ---
         # Monday = 0. Run if it is Monday.
         if now.weekday() == 0 and now.hour >= 9:  # After 9 AM
@@ -350,7 +377,31 @@ class ReportSystem:
                 # Calculate deltas BEFORE taking new snapshot
                 deltas = await self.calculate_deltas("weekly")
                 
-                # Save to history
+                # Save to history (DB or JSON)
+                if self.db and not self.json_mode and deltas:
+                    try:
+                        # Get snapshot ID again to be safe
+                        snap_id = await self.db.get_report_metadata(f"last_weekly_snapshot_id")
+                        if snap_id:
+                            # Remap keys back to adapter expectations
+                            db_payload = []
+                            for i, d in enumerate(deltas, 1):
+                                db_payload.append({
+                                    'steam_id': d['steam_id'],
+                                    'player_name': d['name'],
+                                    'score_delta': d['score'],
+                                    'kills_delta': d['kills'],
+                                    'deaths_delta': d['deaths'],
+                                    'revives_delta': d['revives'],
+                                    'rank': i
+                                })
+                            
+                            await self.db.save_report_delta("weekly", int(snap_id), db_payload)
+                            logger.info("Saved Weekly Report to Database")
+                    except Exception as e:
+                        logger.error(f"Failed to save weekly report to DB: {e}")
+                
+                # Also save to JSON history for backup/legacy
                 if deltas:
                     self.save_to_history("weekly", deltas)
                 
@@ -384,7 +435,31 @@ class ReportSystem:
                 # Calculate deltas BEFORE taking new snapshot
                 deltas = await self.calculate_deltas("monthly")
                 
-                # Save to history
+                # Save to history (DB or JSON)
+                if self.db and not self.json_mode and deltas:
+                    try:
+                        # Get snapshot ID again to be safe
+                        snap_id = await self.db.get_report_metadata(f"last_monthly_snapshot_id")
+                        if snap_id:
+                            # Remap keys back to adapter expectations
+                            db_payload = []
+                            for i, d in enumerate(deltas, 1):
+                                db_payload.append({
+                                    'steam_id': d['steam_id'],
+                                    'player_name': d['name'],
+                                    'score_delta': d['score'],
+                                    'kills_delta': d['kills'],
+                                    'deaths_delta': d['deaths'],
+                                    'revives_delta': d['revives'],
+                                    'rank': i
+                                })
+                            
+                            await self.db.save_report_delta("monthly", int(snap_id), db_payload)
+                            logger.info("Saved Monthly Report to Database")
+                    except Exception as e:
+                        logger.error(f"Failed to save monthly report to DB: {e}")
+                
+                # Also save to JSON history for backup/legacy
                 if deltas:
                     self.save_to_history("monthly", deltas)
                 

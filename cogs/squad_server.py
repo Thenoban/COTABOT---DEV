@@ -127,20 +127,27 @@ class SquadServer(commands.Cog):
         player_map = {} # Name -> DiscordID or SteamID -> DiscordID
         valid_identifiers = set() # Set of valid SteamIDs and Names
         
-        if os.path.exists("squad_db.json"):
+        # Try to use SquadPlayers DB first
+        if players_cog and hasattr(players_cog, 'db') and players_cog.db:
             try:
-                def _read_db():
-                    with open("squad_db.json", "r", encoding="utf-8") as f: return json.load(f)
-                db = await asyncio.to_thread(_read_db)
-                for p in db.get("players", []):
-                    valid_identifiers.add(p["steam_id"])
-                    valid_identifiers.add(p["name"])
+                all_players = await players_cog.db.get_all_players()
+                logger.info(f"Loaded {len(all_players)} players from DB for Panel.")
+                
+                for p in all_players:
+                    valid_identifiers.add(p.steam_id)
+                    valid_identifiers.add(p.name)
                     
-                    # Map for Voice Status
-                    if p.get("discord_id"):
-                        player_map[p["name"]] = p["discord_id"]
-                        player_map[p["steam_id"]] = p["discord_id"]
-            except: pass
+                    if p.discord_id:
+                        player_map[p.name] = p.discord_id
+                        player_map[p.steam_id] = p.discord_id
+                        
+            except Exception as e:
+                logger.error(f"Failed to load players from DB for Panel: {e}")
+        
+        # Fallback to JSON if DB failed or empty? 
+        # Actually prefer DB only now. But keep JSON fallback just in case? 
+        # No, migration is done. If DB fails, we have bigger issues. 
+        # But let's keep the variable names consistent.
         
         logger.info(f"Loaded {len(player_map)} Discord ID mappings.")
             
@@ -371,42 +378,111 @@ class SquadServer(commands.Cog):
 
     @commands.command(name='squad')
     async def squad_status(self, ctx):
-        """Squad sunucusunun anlık durumunu gösterir."""
+        """Squad sunucusunun anlık durumunu ve aktif üyeleri gösterir."""
         if not self.session: self.session = aiohttp.ClientSession()
 
+        status_msg = await ctx.send("📡 **Sunucu verileri çekiliyor...**")
+
         try:
-            async with self.session.get(f"{BM_API_URL}/servers/{SERVER_ID}", headers=self.get_headers()) as response:
+            # 1. Fetch Server Data & Players
+            url = f"{BM_API_URL}/servers/{SERVER_ID}?include=player,identifier"
+            async with self.session.get(url, headers=self.get_headers()) as response:
                 if response.status != 200:
-                    await ctx.send(f"❌ BattleMetrics hatası: {response.status}")
+                    await status_msg.edit(content=f"❌ BattleMetrics hatası: {response.status}")
                     return
                 
                 data = await response.json()
                 server = data['data']['attributes']
-                
+                included_players = data.get('included', [])
+
+                # 2. Parse Server Info
                 name = server.get('name', 'Bilinmeyen Sunucu')
-                players = server.get('players', 0)
+                players_count = server.get('players', 0)
                 max_players = server.get('maxPlayers', 0)
                 queue = server.get('details', {}).get('squad_publicQueue', 0)
                 map_name = server.get('details', {}).get('map', 'Bilinmiyor')
                 status = "🟢 Aktif" if server.get('status') == 'online' else "🔴 Kapalı"
+                
+                # 3. Load DB and Identify Clan Members
+                clan_members_online = []
+                
+                players_cog = self.bot.get_cog('SquadPlayers')
+                valid_identifiers = set()
+                player_map = {}
+                
+                if players_cog and hasattr(players_cog, 'db') and players_cog.db:
+                    try:
+                        all_bp = await players_cog.db.get_all_players()
+                        for p in all_bp:
+                            valid_identifiers.add(p.steam_id)
+                            valid_identifiers.add(p.name)
+                            if p.discord_id:
+                                player_map[p.name] = p.discord_id
+                                player_map[p.steam_id] = p.discord_id
+                    except: pass
+                
+                # Build Map: Player ID -> Steam ID
+                player_steam_map = {}
+                for item in included_players:
+                    if item.get('type') == 'identifier' and item.get('attributes', {}).get('type') == 'steamID':
+                        pid = item.get('relationships', {}).get('player', {}).get('data', {}).get('id')
+                        if pid: player_steam_map[pid] = item['attributes']['identifier']
 
+                # 4. Filter Online Players
+                for item in included_players:
+                    if item['type'] != 'player': continue
+                    
+                    p_name = item['attributes']['name']
+                    p_id = item['id']
+                    steam_id = player_steam_map.get(p_id)
+                    
+                    # Match logic
+                    is_clan = False
+                    if steam_id and steam_id in valid_identifiers: is_clan = True
+                    elif p_name in valid_identifiers: is_clan = True
+                    
+                    if is_clan:
+                        # Check Voice
+                        voice_status = "🔇"
+                        d_id = player_map.get(p_name) or player_map.get(steam_id)
+                        
+                        if d_id:
+                            member = ctx.guild.get_member(d_id) if isinstance(d_id, int) else None
+                            if not member and str(d_id).isdigit(): member = ctx.guild.get_member(int(d_id))
+                            
+                            if member and member.voice and member.voice.channel:
+                                voice_status = f"🔊 {member.voice.channel.name}"
+                        
+                        clan_members_online.append(f"• **{p_name}** ({voice_status})")
+
+                # 5. Build Embed
                 embed = discord.Embed(
                     title=f"🎖️ {name}",
-                    description=f"**Durum:** {status}\n**Harita:** {map_name}",
+                    description=f"**Durum:** {status}\n**Harita:** {map_name}\n**Bağlan:** `steam://connect/{server.get('ip')}:{server.get('port')}`",
                     color=discord.Color(COLORS.SQUAD)
                 )
-                embed.add_field(name="Oyuncular", value=f"{players}/{max_players}", inline=True)
-                embed.add_field(name="Sıra", value=str(queue), inline=True)
                 
-                ip = server.get('ip')
-                port = server.get('port')
-                if ip and port:
-                    embed.add_field(name="Bağlan", value=f"steam://connect/{ip}:{port}", inline=False)
+                embed.add_field(name="👥 Oyuncular", value=f"{players_count}/{max_players}", inline=True)
+                embed.add_field(name="⏳ Sıra", value=str(queue), inline=True)
                 
-                await ctx.send(embed=embed)
+                if clan_members_online:
+                    # Split into chunks if too long
+                    chunk_str = "\n".join(clan_members_online)
+                    if len(chunk_str) > 1024:
+                        embed.add_field(name=f"🛡️ Aktif Üyeler ({len(clan_members_online)})", value=chunk_str[:1000] + "...", inline=False)
+                    else:
+                        embed.add_field(name=f"🛡️ Aktif Üyeler ({len(clan_members_online)})", value=chunk_str, inline=False)
+                else:
+                    embed.add_field(name="🛡️ Aktif Üyeler", value="Şu an oyunda kayıtlı üye yok.", inline=False)
+
+                embed.set_thumbnail(url="https://i.imgur.com/3pK9Y6L.png") # Optional Squad Logo
+                embed.set_footer(text=f"Sorgulayan: {ctx.author.display_name} | {datetime.datetime.now().strftime('%H:%M')}")
+                
+                await status_msg.edit(content=None, embed=embed)
 
         except Exception as e:
-            await ctx.send(f"❌ Bir hata oluştu: {e}")
+            logger.error(f"Squad command error: {e}", exc_info=True)
+            await status_msg.edit(content=f"❌ Bir hata oluştu: {e}")
 
     @commands.command(name='panel_kur')
     async def squad_panel(self, ctx, channel: discord.TextChannel = None):

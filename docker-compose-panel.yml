@@ -1,0 +1,36 @@
+version: '3.8'
+
+services:
+  cotabot-panel:
+    build:
+      context: .
+      dockerfile: web_panel.Dockerfile
+    container_name: cotabot-web-panel
+    restart: always
+    ports:
+      - "5000:5000"
+    volumes:
+      # Mount database file for persistence
+      - ./cotabot_dev.db:/app/cotabot_dev.db
+      # Mount web_admin for live code updates (development)
+      - ./web_admin:/app/web_admin
+      # Mount database module
+      - ./database:/app/database
+    environment:
+      - PYTHONUNBUFFERED=1
+      - FLASK_ENV=production
+      - DATABASE_PATH=/app/cotabot_dev.db
+    env_file:
+      - .env
+    networks:
+      - cotabot-network
+    healthcheck:
+      test: [ "CMD", "curl", "-f", "http://localhost:5000/" ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+networks:
+  cotabot-network:
+    driver: bridge

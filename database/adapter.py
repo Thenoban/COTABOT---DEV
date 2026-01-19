@@ -3,15 +3,19 @@ Database Adapter - Async interface for database operations
 Provides clean API for all database CRUD operations
 """
 from sqlalchemy import create_engine, select, update, delete
-from sqlalchemy.orm import sessionmaker, scoped_session
+from sqlalchemy.orm import sessionmaker, scoped_session, joinedload
 from sqlalchemy.exc import SQLAlchemyError
 from contextlib import contextmanager, asynccontextmanager
-from .models import Base, Player, PlayerStats, ActivityLog, Event, EventParticipant, PassiveRequest
+from .models import Base, Player, PlayerStats, ActivityLog, Event, EventParticipant, PassiveRequest, VoiceSession, VoiceBalance, TrainingMatch, TrainingMatchPlayer, AdminActivityLog
 from exceptions import DatabaseError, DatabaseOperationError, DatabaseConnectionError
 import asyncio
+import logging
 from typing import Optional, List
 from datetime import date, datetime
 import json
+
+# Setup logger
+logger = logging.getLogger(__name__)
 
 
 class DatabaseAdapter:
@@ -107,7 +111,19 @@ class DatabaseAdapter:
         """Get all players"""
         def _query():
             with self.session_scope() as session:
-                players = session.query(Player).all()
+                players = session.query(Player).options(joinedload(Player.stats)).all()
+                session.expunge_all()
+                return players
+        return await asyncio.to_thread(_query)
+
+    async def search_players(self, query_str: str) -> List[Player]:
+        """Search players by name or Steam ID"""
+        def _query():
+            with self.session_scope() as session:
+                players = session.query(Player).options(joinedload(Player.stats)).filter(
+                    (Player.name.ilike(f"%{query_str}%")) | 
+                    (Player.steam_id.ilike(f"%{query_str}%"))
+                ).all()
                 session.expunge_all()
                 return players
         return await asyncio.to_thread(_query)
@@ -193,6 +209,25 @@ class DatabaseAdapter:
                 session.expunge_all()
                 return logs
         return await asyncio.to_thread(_query)
+        
+    async def get_all_recent_activity(self, days: int = 30):
+        """Get all activity logs for all players for the last N days (Optimization)"""
+        def _query():
+            with self.session_scope() as session:
+                from datetime import timedelta
+                since = date.today() - timedelta(days=days)
+                
+                # Join with Player to get names eagerly
+                results = session.query(ActivityLog, Player).\
+                    join(Player, ActivityLog.player_id == Player.id).\
+                    filter(ActivityLog.date >= since).\
+                    all()
+                
+                # Detach all objects to use outside session
+                session.expunge_all()
+                
+                return results
+        return await asyncio.to_thread(_query)
     
     # === EVENT OPERATIONS ===
     
@@ -226,7 +261,7 @@ class DatabaseAdapter:
                 
                 # Force load all attributes and relationships before expunge
                 for event in events:
-                    # Touch all lazy-loaded attributes to load them
+                    # Touch all lazy-loaded attributes
                     _ = event.event_id
                     _ = event.message_id
                     _ = event.channel_id
@@ -237,17 +272,46 @@ class DatabaseAdapter:
                     _ = event.reminder_sent
                     _ = event.active
                     
-                    # Load participants relationship
                     if event.participants:
                         for p in event.participants:
                             _ = p.user_id
                             _ = p.user_mention
                             _ = p.status
                             _ = p.reason
-                    
-                    # Expunge from session so we can use it outside
+                            
                     session.expunge(event)
                 
+                return events
+        return await asyncio.to_thread(_query)
+
+    async def get_all_events(self, guild_id: int, limit: int = 50) -> List[Event]:
+        """Get ALL events (active + archived) for a guild, sorted by date desc"""
+        def _query():
+            with self.session_scope() as session:
+                events = session.query(Event).filter_by(
+                    guild_id=guild_id
+                ).order_by(Event.timestamp.desc()).limit(limit).all()
+                
+                for event in events:
+                    # Touch attributes
+                    _ = event.event_id
+                    _ = event.message_id
+                    _ = event.channel_id
+                    _ = event.creator_id
+                    _ = event.title
+                    _ = event.description
+                    _ = event.timestamp
+                    _ = event.reminder_sent
+                    _ = event.active
+                    
+                    if event.participants:
+                        for p in event.participants:
+                            _ = p.user_id
+                            _ = p.user_mention
+                            _ = p.status
+                            _ = p.reason
+                            
+                    session.expunge(event)
                 return events
         return await asyncio.to_thread(_query)
     
@@ -282,12 +346,152 @@ class DatabaseAdapter:
                         reason=reason
                     )
                     session.add(participant)
+                session.commit()
         return await asyncio.to_thread(_upsert)
+    
+    async def create_event(self, guild_id: int, title: str, description: str, timestamp: datetime, 
+                          channel_id: int, creator_id: int) -> int:
+        """Create a new event"""
+        from .models import Event
+        
+        def _create():
+            with self.session_scope() as session:
+                # Get next event_id for this guild
+                max_event = session.query(Event).filter_by(guild_id=guild_id).order_by(
+                    Event.event_id.desc()
+                ).first()
+                next_event_id = (max_event.event_id + 1) if max_event else 1
+                
+                event = Event(
+                    guild_id=guild_id,
+                    event_id=next_event_id,
+                    title=title,
+                    description=description,
+                    timestamp=timestamp,
+                    channel_id=channel_id,
+                    creator_id=creator_id,
+                    active=True
+                )
+                session.add(event)
+                session.commit()
+                return event.id
+        
+        return await asyncio.to_thread(_create)
+    
+    async def get_event(self, event_db_id: int):
+        """Get a single event by database ID"""
+        def _get():
+            with self.session_scope() as session:
+                event = session.query(Event).filter_by(id=event_db_id).first()
+                if event:
+                    session.expunge(event)
+                return event
+        return await asyncio.to_thread(_get)
+    
+    async def update_event(self, event_db_id: int, title: str = None, description: str = None,
+                          timestamp: datetime = None, reminder_sent: bool = None) -> bool:
+        """Update event details"""
+        def _update():
+            with self.session_scope() as session:
+                event = session.query(Event).filter_by(id=event_db_id).first()
+                if event:
+                    if title is not None:
+                        event.title = title
+                    if description is not None:
+                        event.description = description
+                    if timestamp is not None:
+                        event.timestamp = timestamp
+                    if reminder_sent is not None:
+                        event.reminder_sent = reminder_sent
+                    return True
+                return False
+        return await asyncio.to_thread(_update)
+    
+    async def deactivate_event(self, event_db_id: int) -> bool:
+        """Mark event as inactive (archived)"""
+        def _deactivate():
+            with self.session_scope() as session:
+                event = session.query(Event).filter_by(id=event_db_id).first()
+                if event:
+                    event.active = False
+                    return True
+                return False
+        return await asyncio.to_thread(_deactivate)
+    
+    def get_event_participants(self, event_id):
+        """Get all participants for an event"""
+        try:
+            with self.session_scope() as session:
+                participants = session.query(EventParticipant)\
+                    .filter_by(event_id=event_id)\
+                    .order_by(EventParticipant.joined_at.desc())\
+                    .all()
+                
+                # Detach from session
+                session.expunge_all()
+                return participants
+        except Exception as e:
+            logger.error(f"Error getting event participants: {e}")
+            raise DatabaseOperationError(f"Failed to get event participants: {e}")
+    
+    async def delete_event(self, event_db_id: int) -> bool:
+        """Permanently delete event"""
+        def _delete():
+            with self.session_scope() as session:
+                event = session.query(Event).filter_by(id=event_db_id).first()
+                if event:
+                    session.delete(event)
+                    return True
+                return False
+        return await asyncio.to_thread(_delete)
+    
+    async def update_reminder_status(self, event_db_id: int, reminder_sent: bool) -> bool:
+        """Update reminder sent status"""
+        def _update():
+            with self.session_scope() as session:
+                event = session.query(Event).filter_by(id=event_db_id).first()
+                if event:
+                    event.reminder_sent = reminder_sent
+                    return True
+                return False
+        return await asyncio.to_thread(_update)
+    
+    async def get_event_by_message_id(self, guild_id: int, message_id: int) -> Optional[Event]:
+        """Get event by Discord message ID"""
+        def _query():
+            with self.session_scope() as session:
+                event = session.query(Event).filter_by(
+                    guild_id=guild_id,
+                    message_id=message_id
+                ).first()
+                if event:
+                    # Load all attributes before expunge
+                    _ = event.id
+                    _ = event.event_id
+                    _ = event.title
+                    _ = event.description
+                    _ = event.timestamp
+                    _ = event.channel_id
+                    _ = event.creator_id
+                    _ = event.active
+                    _ = event.reminder_sent
+                    
+                    # Load participants
+                    if event.participants:
+                        for p in event.participants:
+                            _ = p.user_id
+                            _ = p.user_mention
+                            _ = p.status
+                            _ = p.reason
+                    
+                    session.expunge(event)
+                return event
+        return await asyncio.to_thread(_query)
     
     # === PASSIVE REQUEST OPERATIONS ===
     
     async def add_passive_request(self, user_id: int, user_name: str, reason: str,
-                                  start_date: date, end_date: date):
+                                  start_date: date, end_date: date) -> int:
         """Add passive/away request"""
         def _add():
             with self.session_scope() as session:
@@ -299,6 +503,8 @@ class DatabaseAdapter:
                     end_date=end_date
                 )
                 session.add(request)
+                session.flush()
+                return request.id
         return await asyncio.to_thread(_add)
     
     async def get_active_passive_requests(self) -> List[PassiveRequest]:
@@ -306,10 +512,276 @@ class DatabaseAdapter:
         def _query():
             with self.session_scope() as session:
                 today = date.today()
-                return session.query(PassiveRequest).filter(
+                requests = session.query(PassiveRequest).filter(
                     PassiveRequest.end_date >= today
-                ).all()
+                ).order_by(PassiveRequest.start_date).all()
+                session.expunge_all()
+                return requests
         return await asyncio.to_thread(_query)
+    
+    async def get_all_passive_requests(self) -> List[PassiveRequest]:
+        """Get all passive requests (including expired)"""
+        def _query():
+            with self.session_scope() as session:
+                requests = session.query(PassiveRequest).order_by(
+                    PassiveRequest.created_at.desc()
+                ).all()
+                session.expunge_all()
+                return requests
+        return await asyncio.to_thread(_query)
+    
+    async def delete_passive_request(self, request_id: int) -> bool:
+        """Delete passive request by ID"""
+        def _delete():
+            with self.session_scope() as session:
+                request = session.query(PassiveRequest).filter_by(id=request_id).first()
+                if request:
+                    session.delete(request)
+                    return True
+                return False
+        return await asyncio.to_thread(_delete)
+    
+    # ============================================
+    # VOICE STATS OPERATIONS
+    # ============================================
+    
+    async def start_voice_session(self, guild_id: int, user_id: int, 
+                                  channel_id: int, channel_name: str) -> int:
+        """Start a new voice session"""
+        def _start():
+            with self.session_scope() as session:
+                voice_session = VoiceSession(
+                    guild_id=guild_id,
+                    user_id=user_id,
+                    channel_id=channel_id,
+                    channel_name=channel_name,
+                    joined_at=datetime.now()
+                )
+                session.add(voice_session)
+                session.flush()
+                return voice_session.id
+        return await asyncio.to_thread(_start)
+    
+    async def end_voice_session(self, session_id: int, coins_earned: int = 0) -> float:
+        """End voice session, calculate duration, return duration in seconds"""
+        def _end():
+            with self.session_scope() as session:
+                voice_session = session.query(VoiceSession).filter_by(id=session_id).first()
+                if voice_session and not voice_session.left_at:
+                    voice_session.left_at = datetime.now()
+                    voice_session.duration_seconds = (voice_session.left_at - voice_session.joined_at).total_seconds()
+                    voice_session.coins_earned = coins_earned
+                    return voice_session.duration_seconds
+                return 0.0
+        return await asyncio.to_thread(_end)
+    
+    async def get_active_session(self, guild_id: int, user_id: int) -> Optional[VoiceSession]:
+        """Get user's active session (left_at is NULL)"""
+        def _query():
+            with self.session_scope() as session:
+                voice_session = session.query(VoiceSession).filter_by(
+                    guild_id=guild_id,
+                    user_id=user_id,
+                    left_at=None
+                ).first()
+                if voice_session:
+                    session.expunge(voice_session)
+                return voice_session
+        return await asyncio.to_thread(_query)
+    
+    async def get_voice_balance(self, guild_id: int, user_id: int) -> VoiceBalance:
+        """Get or create voice balance"""
+        def _get_or_create():
+            with self.session_scope() as session:
+                balance = session.query(VoiceBalance).filter_by(
+                    guild_id=guild_id,
+                    user_id=user_id
+                ).first()
+                
+                if not balance:
+                    balance = VoiceBalance(
+                        guild_id=guild_id,
+                        user_id=user_id,
+                        balance=0,
+                        pending_seconds=0.0,
+                        total_time_seconds=0.0
+                    )
+                    session.add(balance)
+                    session.flush()
+                
+                session.expunge(balance)
+                return balance
+        return await asyncio.to_thread(_get_or_create)
+    
+    async def update_voice_balance(self, guild_id: int, user_id: int, 
+                                   coins_delta: int = 0, pending_secs_delta: float = 0,
+                                   duration_delta: float = 0) -> bool:
+        """Update voice balance (add/subtract coins, pending seconds, total time)"""
+        def _update():
+            with self.session_scope() as session:
+                balance = session.query(VoiceBalance).filter_by(
+                    guild_id=guild_id,
+                    user_id=user_id
+                ).first()
+                
+                if not balance:
+                    balance = VoiceBalance(
+                        guild_id=guild_id,
+                        user_id=user_id,
+                        balance=coins_delta,
+                        pending_seconds=pending_secs_delta,
+                        total_time_seconds=duration_delta
+                    )
+                    session.add(balance)
+                else:
+                    balance.balance += coins_delta
+                    balance.pending_seconds += pending_secs_delta
+                    balance.total_time_seconds += duration_delta
+                    balance.last_updated = datetime.now()
+                
+                return True
+        return await asyncio.to_thread(_update)
+    
+    async def transfer_voice_coins(self, guild_id: int, sender_id: int, 
+                                   receiver_id: int, amount: int) -> bool:
+        """Transfer coins between users"""
+        def _transfer():
+            with self.session_scope() as session:
+                sender = session.query(VoiceBalance).filter_by(
+                    guild_id=guild_id, user_id=sender_id
+                ).first()
+                
+                if not sender or sender.balance < amount:
+                    return False
+                
+                receiver = session.query(VoiceBalance).filter_by(
+                    guild_id=guild_id, user_id=receiver_id
+                ).first()
+                
+                if not receiver:
+                    receiver = VoiceBalance(
+                        guild_id=guild_id,
+                        user_id=receiver_id,
+                        balance=0,
+                        pending_seconds=0.0,
+                        total_time_seconds=0.0
+                    )
+                    session.add(receiver)
+                    session.flush()
+                
+                sender.balance -= amount
+                receiver.balance += amount
+                return True
+        return await asyncio.to_thread(_transfer)
+    
+    async def get_user_voice_stats(self, guild_id: int, user_id: int) -> dict:
+        """Get user's voice stats (Historical Balance + Active Session)"""
+        def _query():
+            with self.session_scope() as session:
+                # 1. Get total from VoiceBalance (Includes history + completed sessions)
+                balance_record = session.query(VoiceBalance).filter_by(
+                    guild_id=guild_id, user_id=user_id
+                ).first()
+                total_seconds = float(balance_record.total_time_seconds) if balance_record else 0.0
+                
+                # 2. Check for ACTIVE session (add real-time duration)
+                active_session = session.query(VoiceSession).filter(
+                    VoiceSession.guild_id == guild_id,
+                    VoiceSession.user_id == user_id,
+                    VoiceSession.left_at.is_(None)
+                ).first()
+                
+                current_session_duration = 0.0
+                if active_session:
+                    current_session_duration = (datetime.now() - active_session.joined_at).total_seconds()
+                    total_seconds += current_session_duration
+                
+                # 3. Per-channel breakdown (Completed Sessions)
+                from sqlalchemy import func
+                channel_stats = session.query(
+                    VoiceSession.channel_id,
+                    VoiceSession.channel_name,
+                    func.sum(VoiceSession.duration_seconds).label('total_seconds')
+                ).filter(
+                    VoiceSession.guild_id == guild_id, 
+                    VoiceSession.user_id == user_id,
+                    VoiceSession.left_at.isnot(None) # Only completed
+                ).group_by(
+                    VoiceSession.channel_id, VoiceSession.channel_name
+                ).all()
+                
+                channels = {}
+                for cid, cname, secs in channel_stats:
+                    if cid:
+                        channels[str(cid)] = {
+                            "name": cname or "Unknown",
+                            "seconds": float(secs or 0.0)
+                        }
+                
+                # Add active session to channel breakdown logic if needed
+                if active_session and str(active_session.channel_id) in channels:
+                    channels[str(active_session.channel_id)]["seconds"] += current_session_duration
+                elif active_session:
+                    channels[str(active_session.channel_id)] = {
+                        "name": active_session.channel_name or "Unknown",
+                        "seconds": current_session_duration
+                    }
+                
+                return {
+                    "total_seconds": total_seconds,
+                    "channels": channels
+                }
+        return await asyncio.to_thread(_query)
+    
+    async def get_voice_leaderboard(self, guild_id: int, limit: int = 10) -> List[dict]:
+        """Get top users by total voice time (Balance + Active Sessions)"""
+        def _query():
+            with self.session_scope() as session:
+                # 1. Get all balances
+                balances = session.query(
+                    VoiceBalance.user_id,
+                    VoiceBalance.total_time_seconds
+                ).filter_by(guild_id=guild_id).all()
+                
+                # Use a dict to merge stats
+                stats_map = {uid: float(secs or 0.0) for uid, secs in balances}
+                
+                # 2. Get active sessions to add real-time duration
+                active_sessions = session.query(VoiceSession).filter(
+                    VoiceSession.guild_id == guild_id,
+                    VoiceSession.left_at.is_(None)
+                ).all()
+                
+                now = datetime.now()
+                for s in active_sessions:
+                    if s.joined_at:
+                        duration = (now - s.joined_at).total_seconds()
+                        stats_map[s.user_id] = stats_map.get(s.user_id, 0.0) + duration
+                
+                # 3. Sort and limit
+                sorted_stats = sorted(stats_map.items(), key=lambda x: x[1], reverse=True)[:limit]
+                
+                return [
+                    {"user_id": int(uid), "total_seconds": secs}
+                    for uid, secs in sorted_stats
+                ]
+        return await asyncio.to_thread(_query)
+    
+    async def get_user_voice_history(self, guild_id: int, user_id: int, days: int = 7) -> List[VoiceSession]:
+        """Get recent session history"""
+        def _query():
+            with self.session_scope() as session:
+                from_date = datetime.now() - timedelta(days=days)
+                sessions = session.query(VoiceSession).filter(
+                    VoiceSession.guild_id == guild_id,
+                    VoiceSession.user_id == user_id,
+                    VoiceSession.joined_at >= from_date
+                ).order_by(VoiceSession.joined_at.desc()).all()
+                
+                session.expunge_all()
+                return sessions
+        return await asyncio.to_thread(_query)
+    
     # ============================================
     # REPORT SYSTEM METHODS
     # ============================================
@@ -596,23 +1068,128 @@ class DatabaseAdapter:
                 return True
         return await asyncio.to_thread(_upsert)
     
-    async def get_training_matches(self, limit: int = 10, status: str = None):
-        """Get recent training matches"""
+
+    # ============================================
+    # TRAINING SYSTEM METHODS
+    # ============================================
+    
+    async def create_training_match(self, match_id: int, server_ip: str, map_name: str, start_time: datetime = None) -> int:
+        """Create a new training match record"""
+        def _create():
+            with self.session_scope() as session:
+                if not start_time:
+                    s_time = datetime.now()
+                else:
+                    s_time = start_time
+                
+                # Check consistency if needed, but here we just blindly insert
+                # Note: 'id' is autoincrement DB ID, we might store 'match_id' as metadata or separate column if needed.
+                # The model has 'id' as PK. Creating a separate logical match_id column might be confusing if not aligned.
+                # However, the migration script suggests 'match_id' from json is just an integer sequence.
+                # We can use the DB's ID as the match_id if we migrate sequentially.
+                # But migration script passes 'match_id'.
+                # Let's check models.py again. I defined 'id' as Integer PK.
+                # So I should probably insert with that ID if I want to preserve JSON IDs, OR let DB handle it.
+                # For migration, we want to preserve IDs.
+                
+                existing = session.query(TrainingMatch).filter_by(id=match_id).first()
+                if existing:
+                    return existing.id
+                
+                match = TrainingMatch(
+                    id=match_id, # Force ID from JSON to maintain history
+                    server_ip=server_ip,
+                    map_name=map_name,
+                    start_time=s_time,
+                    status='active'
+                )
+                session.add(match)
+                session.flush()
+                return match.id
+        return await asyncio.to_thread(_create)
+
+    async def update_training_match(self, match_id: int, status: str = None, end_time: datetime = None, 
+                                  snapshot_start: str = None, snapshot_end: str = None) -> bool:
+        """Update training match details (status, snapshots)"""
+        def _update():
+            with self.session_scope() as session:
+                match = session.query(TrainingMatch).filter_by(id=match_id).first()
+                if not match:
+                    return False
+                
+                if status: match.status = status
+                if end_time: match.end_time = end_time
+                if snapshot_start: match.snapshot_start_json = snapshot_start
+                if snapshot_end: match.snapshot_end_json = snapshot_end
+                
+                return True
+        return await asyncio.to_thread(_update)
+
+    async def add_training_player(self, match_id: int, player_data: dict) -> bool:
+        """Add or update player stats for a match"""
+        def _upsert():
+            with self.session_scope() as session:
+                # Expects player_data to contain 'steam_id'
+                steam_id = player_data.get('steam_id')
+                if not steam_id: return False
+                
+                # Ensure Player exists in main table first (Migration does this usually, but safe to check)
+                # But migration script might run before player sync. 
+                # Ideally, we should ensure player exists.
+                # For now, simplistic approach:
+                
+                # Check existing match player
+                mpConnection = session.query(TrainingMatchPlayer).filter_by(
+                    match_id=match_id,
+                    steam_id=steam_id
+                ).first()
+                
+                if not mpConnection:
+                    mpConnection = TrainingMatchPlayer(
+                        match_id=match_id,
+                        steam_id=steam_id
+                    )
+                    session.add(mpConnection)
+                
+                # Update fields
+                if 'kills_manual' in player_data: mpConnection.manual_kills = player_data['kills_manual']
+                if 'deaths_manual' in player_data: mpConnection.manual_deaths = player_data['deaths_manual']
+                if 'assists_manual' in player_data: mpConnection.manual_assists = player_data['assists_manual']
+                
+                if 'final_kills' in player_data: mpConnection.final_kills = player_data['final_kills']
+                if 'final_deaths' in player_data: mpConnection.final_deaths = player_data['final_deaths']
+                if 'final_assists' in player_data: mpConnection.final_assists = player_data['final_assists']
+                if 'kd_ratio' in player_data: mpConnection.kd_ratio = player_data['kd_ratio']
+                if 'data_source' in player_data: mpConnection.data_source = player_data['data_source']
+                
+                return True
+        return await asyncio.to_thread(_upsert)
+
+    async def get_active_training_match(self):
+        """Get the currently active training match"""
         def _get():
-            from .models import TrainingMatch, TrainingPlayer
+            with self.session_scope() as session:
+                return session.query(TrainingMatch).filter_by(status='active').order_by(TrainingMatch.start_time.desc()).first()
+        return await asyncio.to_thread(_get)
+
+    async def get_training_matches(self, limit: int = 10, status: str = None):
+        """Get recent training matches with full details"""
+        def _get():
             with self.session_scope() as session:
                 query = session.query(TrainingMatch)
                 if status:
                     query = query.filter_by(status=status)
-                query = query.order_by(TrainingMatch.start_time.desc()).limit(limit)
+                
+                # Order by ID desc (newest first)
+                query = query.order_by(TrainingMatch.id.desc()).limit(limit)
                 
                 matches = []
                 for match in query.all():
-                    # Get players for this match
-                    players = session.query(TrainingPlayer).filter_by(match_id=match.id).all()
+                    # Get players
+                    players = match.players # Relationship
                     
                     matches.append({
-                        'match_id': match.match_id,
+                        'match_id': match.id,
                         'server_ip': match.server_ip,
                         'map_name': match.map_name,
                         'start_time': match.start_time.isoformat() if match.start_time else None,
@@ -620,7 +1197,7 @@ class DatabaseAdapter:
                         'status': match.status,
                         'players': [{
                             'steam_id': p.steam_id,
-                            'name': p.name,
+                            'name': p.player.name if p.player else "Unknown", # Resolve via relationship
                             'final_kills': p.final_kills,
                             'final_deaths': p.final_deaths,
                             'final_assists': p.final_assists,
@@ -630,3 +1207,125 @@ class DatabaseAdapter:
                     })
                 return matches
         return await asyncio.to_thread(_get)
+
+    # ============================================
+    # HALL OF FAME OPERATIONS
+    # ============================================
+    
+    async def get_hall_of_fame_records(self):
+        """Get all Hall of Fame records"""
+        from .models import HallOfFameRecord
+        
+        def _query():
+            with self.session_scope() as session:
+                records = session.query(HallOfFameRecord).order_by(
+                    HallOfFameRecord.achieved_at.desc()
+                ).all()
+                session.expunge_all()
+                return records
+        
+        return await asyncio.to_thread(_query)
+    
+    # ============================================
+    # WEB-BOT ACTION QUEUE OPERATIONS
+    # ============================================
+    
+    async def queue_bot_action(self, action_type: str, data: dict):
+        """Queue an action for the bot to process"""
+        from .models import WebBotAction
+        import json
+        
+        def _queue():
+            with self.session_scope() as session:
+                action = WebBotAction(
+                    action_type=action_type,
+                    data=json.dumps(data)
+                )
+                session.add(action)
+                session.commit()
+                return action.id
+        
+        return await asyncio.to_thread(_queue)
+    
+    async def get_pending_web_actions(self, limit: int = 50):
+        """Get pending actions for bot to process"""
+        from .models import WebBotAction
+        
+        def _query():
+            with self.session_scope() as session:
+                actions = session.query(WebBotAction).filter(
+                    WebBotAction.status == 'pending'
+                ).order_by(
+                    WebBotAction.created_at.asc()
+                ).limit(limit).all()
+                session.expunge_all()
+                return actions
+        
+        return await asyncio.to_thread(_query)
+    
+    async def mark_action_processed(self, action_id: int):
+        """Mark an action as successfully processed"""
+        from .models import WebBotAction
+        from datetime import datetime # Added import for datetime
+        
+        def _update():
+            with self.session_scope() as session:
+                action = session.query(WebBotAction).filter_by(id=action_id).first()
+                if action:
+                    action.status = 'processed'
+                    action.processed_at = datetime.utcnow()
+                    session.commit()
+        
+        return await asyncio.to_thread(_update)
+    
+    async def mark_action_failed(self, action_id: int, error_message: str):
+        """Mark an action as failed"""
+        from .models import WebBotAction
+        from datetime import datetime # Added import for datetime
+        
+        def _update():
+            with self.session_scope() as session:
+                action = session.query(WebBotAction).filter_by(id=action_id).first()
+                if action:
+                    action.status = 'failed'
+                    action.error_message = error_message
+                    action.retry_count += 1
+                    action.processed_at = datetime.utcnow()
+                    session.commit()
+        
+        return await asyncio.to_thread(_update)
+    # ============================================
+    # ADMIN ACTIVITY LOG METHODS  
+    # ============================================
+    
+    async def log_activity(self, action_type: str, target: str, details: str = None, admin_user: str = 'web_admin'):
+        """Log an admin activity"""
+        from .models import AdminActivityLog
+        
+        def _log():
+            with self.session_scope() as session:
+                log = AdminActivityLog(
+                    action_type=action_type,
+                    admin_user=admin_user,
+                    target=target,
+                    details=details
+                )
+                session.add(log)
+                session.commit()
+        
+        return await asyncio.to_thread(_log)
+    
+    async def get_recent_activities(self, limit: int = 20):
+        """Get recent admin activities"""
+        from .models import AdminActivityLog
+        
+        def _query():
+            with self.session_scope() as session:
+                activities = session.query(AdminActivityLog).order_by(
+                    AdminActivityLog.timestamp.desc()
+                ).limit(limit).all()
+                session.expunge_all()
+                return activities
+        
+        return await asyncio.to_thread(_query)
+

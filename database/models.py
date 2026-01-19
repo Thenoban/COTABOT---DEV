@@ -1,7 +1,7 @@
 """
 SQLAlchemy models for Cotabot database schema
 """
-from sqlalchemy import Column, Integer, String, BigInteger, Float, DateTime, Date, Boolean, Text, ForeignKey, UniqueConstraint
+from sqlalchemy import Column, Integer, String, BigInteger, Float, DateTime, Date, Boolean, Text, ForeignKey, UniqueConstraint, Index
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import relationship
 from datetime import datetime
@@ -222,6 +222,60 @@ class DeltaEntry(Base):
         return f"<DeltaEntry(player={self.player_name}, score_delta={self.score_delta})>"
 
 
+# ============================================
+# VOICE STATS MODELS
+# ============================================
+
+class VoiceSession(Base):
+    """Individual voice channel session tracking"""
+    __tablename__ = 'voice_sessions'
+    
+    id = Column(Integer, primary_key=True)
+    guild_id = Column(BigInteger, nullable=False, index=True)
+    user_id = Column(BigInteger, nullable=False, index=True)
+    channel_id = Column(BigInteger)
+    channel_name = Column(String(100))
+    
+    joined_at = Column(DateTime, nullable=False)
+    left_at = Column(DateTime)  # NULL = still in channel
+    duration_seconds = Column(Float, default=0.0)
+    
+    # Economy integration
+    coins_earned = Column(Integer, default=0)
+    
+    created_at = Column(DateTime, default=datetime.utcnow)
+    
+    __table_args__ = (
+        Index('idx_voice_user_guild', 'user_id', 'guild_id'),
+        Index('idx_voice_channel', 'channel_id'),
+        Index('idx_voice_joined', 'joined_at'),
+    )
+    
+    def __repr__(self):
+        return f"<VoiceSession(user={self.user_id}, channel={self.channel_name}, duration={self.duration_seconds}s)>"
+
+
+class VoiceBalance(Base):
+    """Voice activity coin balance tracking"""
+    __tablename__ = 'voice_balances'
+    
+    id = Column(Integer, primary_key=True)
+    guild_id = Column(BigInteger, nullable=False)
+    user_id = Column(BigInteger, nullable=False)
+    balance = Column(Integer, default=0)  # CotaSüre coins
+    pending_seconds = Column(Float, default=0.0)  # Accumulated seconds not yet converted to coins
+    total_time_seconds = Column(Float, default=0.0)  # Total voice time (for migration)
+    last_updated = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    
+    __table_args__ = (
+        Index('idx_voice_balance_user', 'guild_id', 'user_id', unique=True),
+    )
+    
+    def __repr__(self):
+        return f"<VoiceBalance(user={self.user_id}, balance={self.balance}, pending={self.pending_seconds}s)>"
+
+
+
 
 class ReportMetadata(Base):
     """Stores report system metadata (last run times, etc)"""
@@ -262,53 +316,106 @@ print("  - hall_of_fame: Record achievements")
 
 
 
+
 # ============================================
-# TRAINING MATCHES MODELS
+# TRAINING SYSTEM MODELS
 # ============================================
 
 class TrainingMatch(Base):
-    """Training match records"""
+    """Training matches history"""
     __tablename__ = 'training_matches'
     
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    match_id = Column(String(20), unique=True, nullable=False, index=True)
+    id = Column(Integer, primary_key=True)
+    start_time = Column(DateTime, default=datetime.utcnow)
+    end_time = Column(DateTime, nullable=True)
     server_ip = Column(String(50))
     map_name = Column(String(100))
-    start_time = Column(DateTime, nullable=False)
-    end_time = Column(DateTime)
-    status = Column(String(20), default='active')
-    snapshot_start_json = Column(Text)
-    snapshot_end_json = Column(Text)
-    created_at = Column(DateTime, default=datetime.utcnow)
+    status = Column(String(20), default='active') # 'active', 'completed'
     
-    players = relationship("TrainingPlayer", back_populates="match", cascade="all, delete-orphan")
+    # Store snapshot data as JSON text for reference/debugging
+    # This prevents data loss if schema changes or for audit purposes
+    snapshot_start_json = Column(Text, nullable=True)
+    snapshot_end_json = Column(Text, nullable=True)
+    
+    # Relationship
+    players = relationship("TrainingMatchPlayer", back_populates="match", cascade="all, delete-orphan")
     
     def __repr__(self):
-        return f"<TrainingMatch(id={self.match_id}, map={self.map_name})>"
+        return f"<TrainingMatch(id={self.id}, map={self.map_name}, status={self.status})>"
 
 
-class TrainingPlayer(Base):
-    """Player participation in training match"""
-    __tablename__ = 'training_players'
+class TrainingMatchPlayer(Base):
+    """Player stats for a specific training match"""
+    __tablename__ = 'training_match_players'
     
     id = Column(Integer, primary_key=True, autoincrement=True)
     match_id = Column(Integer, ForeignKey('training_matches.id'), nullable=False, index=True)
-    steam_id = Column(String(20))
-    name = Column(String(100))
-    kills_manual = Column(Integer)
-    deaths_manual = Column(Integer)
-    assists_manual = Column(Integer)
+    
+    # We store steam_id directly too for easier querying/integrity if player ref is missing
+    # But we also link to Players table
+    steam_id = Column(String(50), ForeignKey('players.steam_id'), nullable=False, index=True)
+    
+    # Stats (Manual Entry)
+    manual_kills = Column(Integer, nullable=True)
+    manual_deaths = Column(Integer, nullable=True)
+    manual_assists = Column(Integer, nullable=True)
+    
+    # Final Calculated Stats (can be same as manual or derived)
     final_kills = Column(Integer, default=0)
     final_deaths = Column(Integer, default=0)
     final_assists = Column(Integer, default=0)
     kd_ratio = Column(Float, default=0.0)
-    data_source = Column(String(20))
     
+    data_source = Column(String(20), default='manual') # 'manual', 'pending', 'auto'
+    
+    # Relationships
     match = relationship("TrainingMatch", back_populates="players")
+    player = relationship("Player")
     
     __table_args__ = (
-        UniqueConstraint('match_id', 'steam_id', name='_match_player_uc'),
+        # Ensure unique player per match
+        UniqueConstraint('match_id', 'steam_id', name='_training_match_player_uc'),
     )
     
     def __repr__(self):
-        return f"<TrainingPlayer(name={self.name})>"
+        return f"<TrainingMatchPlayer(match={self.match_id}, player={self.steam_id})>"
+
+
+# ============================================
+# ADMIN ACTIVITY LOG
+# ============================================
+
+class AdminActivityLog(Base):
+    """Logs all admin actions for web panel activity display"""
+    __tablename__ = 'admin_activity_logs'
+    
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    action_type = Column(String(50), nullable=False, index=True)  # player_add, player_delete, event_create, etc.
+    admin_user = Column(String(100), default='web_admin')  # Who performed the action
+    target = Column(String(200))  # What was affected (player name, event title, etc.)
+    details = Column(Text)  # JSON details or description
+    timestamp = Column(DateTime, default=datetime.utcnow, index=True)
+    
+    def __repr__(self):
+        return f"<AdminActivityLog(action={self.action_type}, target={self.target}, time={self.timestamp})>"
+
+
+# ============================================
+# WEB-BOT INTEGRATION QUEUE
+# ============================================
+
+class WebBotAction(Base):
+    """Queue for web admin actions that need to be processed by Discord bot"""
+    __tablename__ = 'web_bot_actions'
+    
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    action_type = Column(String(50), nullable=False, index=True)  # announce_event, notify_player_add, etc.
+    data = Column(Text, nullable=False)  # JSON data for the action
+    status = Column(String(20), default='pending', index=True)  # pending, processed, failed
+    created_at = Column(DateTime, default=datetime.utcnow, index=True)
+    processed_at = Column(DateTime, nullable=True)
+    error_message = Column(Text, nullable=True)
+    retry_count = Column(Integer, default=0)
+    
+    def __repr__(self):
+        return f"<WebBotAction(type={self.action_type}, status={self.status}, created={self.created_at})>"

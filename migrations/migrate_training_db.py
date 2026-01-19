@@ -22,29 +22,29 @@ async def migrate_training_db():
     
     # 1. Load training_db.json
     if not os.path.exists('training_db.json'):
-        print("❌ training_db.json not found!")
+        print("[ERROR] training_db.json not found!")
         return False
     
     with open('training_db.json', 'r', encoding='utf-8') as f:
         data = json.load(f)
     
     matches = data.get('matches', [])
-    print(f"\n📁 Found {len(matches)} matches in training_db.json")
+    print(f"\n[INFO] Found {len(matches)} matches in training_db.json")
     
     if not matches:
-        print("⚠️  No matches to migrate")
+        print("[WARN]  No matches to migrate")
         return True
     
     # 2. Backup original file
     backup_dir = f'backups/migration_{datetime.now().strftime("%Y%m%d_%H%M%S")}'
     os.makedirs(backup_dir, exist_ok=True)
     shutil.copy('training_db.json', f'{backup_dir}/training_db.json.backup')
-    print(f"✅ Backup created: {backup_dir}/training_db.json.backup")
+    print(f"[OK] Backup created: {backup_dir}/training_db.json.backup")
     
     # 3. Connect to database
     db = DatabaseAdapter('sqlite:///cotabot_dev.db')
     db.init_db()
-    print("✅ Database connected")
+    print("[OK] Database connected")
     
     # 4. Migrate each match
     migrated = 0
@@ -92,11 +92,11 @@ async def migrate_training_db():
                     }
                 )
             
-            print(f"    ✅ Match #{match_id}: {len(players)} players migrated")
+            print(f"    [OK] Match #{match_id}: {len(players)} players migrated")
             migrated += 1
             
         except Exception as e:
-            print(f"    ❌ Match #{match_id} failed: {e}")
+            print(f"    [ERROR] Match #{match_id} failed: {e}")
             failed.append((match_id, str(e)))
     
     # 5. Verify migration
@@ -105,11 +105,11 @@ async def migrate_training_db():
     print("=" * 60)
     
     db_matches = await db.get_training_matches(limit=100)
-    print(f"✅ Database contains {len(db_matches)} matches")
-    print(f"✅ Successfully migrated: {migrated}/{len(matches)}")
+    print(f"[OK] Database contains {len(db_matches)} matches")
+    print(f"[OK] Successfully migrated: {migrated}/{len(matches)}")
     
     if failed:
-        print(f"❌ Failed: {len(failed)}")
+        print(f"[ERROR] Failed: {len(failed)}")
         for match_id, error in failed:
             print(f"   - Match #{match_id}: {error}")
     
@@ -124,9 +124,9 @@ async def migrate_training_db():
 if __name__ == '__main__':
     success = asyncio.run(migrate_training_db())
     if success:
-        print("\n🎉 Training DB migration successful!")
+        print("\n[SUCCESS] Training DB migration successful!")
         print("   Original file backed up.")
         print("   You can now remove training_db.json or keep as archive.")
     else:
-        print("\n⚠️  Migration completed with errors!")
+        print("\n[WARN]  Migration completed with errors!")
         print("   Check errors above and retry if needed.")

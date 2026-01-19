@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="tr">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Cotabot Admin Panel</title>
+    <link rel="stylesheet" href="/css/styles.css">
+    <!-- Chart.js for data visualization -->
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+</head>
+
+<body>
+    <!-- Login Screen -->
+    <div id="loginScreen" class="login-screen">
+        <div class="login-container">
+            <div class="login-card card">
+                <div class="login-header">
+                    <div class="logo">
+                        <div class="logo-icon">🤖</div>
+                        <span>COTABOT</span>
+                    </div>
+                    <p class="login-subtitle">Web Admin Panel</p>
+                </div>
+                <form id="loginForm">
+                    <div class="form-group">
+                        <label class="form-label">API Key</label>
+                        <input type="password" id="apiKeyInput" class="form-input" placeholder="Enter your API key"
+                            required>
+                    </div>
+                    <button type="submit" class="btn btn-primary" style="width: 100%;">
+                        <span>🔐</span>
+                        <span>Login</span>
+                    </button>
+                </form>
+                <div id="loginError" class="hidden"
+                    style="color: var(--color-error); margin-top: 1rem; text-align: center;"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Main App (Hidden until logged in) -->
+    <div id="mainApp" class="app-container hidden">
+        <!-- Sidebar -->
+        <aside class="sidebar">
+            <div class="sidebar-header">
+                <div class="logo">
+                    <div class="logo-icon">🤖</div>
+                    <span>COTABOT</span>
+                </div>
+                <p class="sidebar-subtitle">Admin Panel</p>
+            </div>
+
+            <nav>
+                <ul class="nav-menu">
+                    <li class="nav-item">
+                        <a href="#dashboard" class="nav-link active" data-page="dashboard">
+                            <span class="nav-icon">📊</span>
+                            <span>Dashboard</span>
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a href="#players" class="nav-link" data-page="players">
+                            <span class="nav-icon">👥</span>
+                            <span>Players</span>
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a href="#events" class="nav-link" data-page="events">
+                            <span class="nav-icon">📅</span>
+                            <span>Events</span>
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a href="#reports" class="nav-link" data-page="reports">
+                            <span class="nav-icon">📈</span>
+                            <span>Reports</span>
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a href="#server" class="nav-link" data-page="server">
+                            <span class="nav-icon">🖥️</span>
+                            <span>Server Status</span>
+                        </a>
+                    </li>
+                    <li class="nav-item">
+                        <a href="#settings" class="nav-link" data-page="settings">
+                            <span class="nav-icon">⚙️</span>
+                            <span>Settings</span>
+                        </a>
+                    </li>
+                </ul>
+            </nav>
+
+            <!-- Environment Selector -->
+            <div class="environment-selector">
+                <label class="form-label" style="font-size: 0.75rem; margin-bottom: 0.5rem;">Environment</label>
+                <select id="environmentSelect" class="form-input">
+                    <option value="DEV">🔧 Development</option>
+                    <option value="LIVE">🚀 Production</option>
+                </select>
+                <div id="environmentBadge" class="environment-badge env-dev">
+                    <span>🔧</span>
+                    <span>DEV</span>
+                </div>
+            </div>
+        </aside>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            <!-- Dynamic content will be loaded here -->
+            <div id="pageContent"></div>
+        </main>
+    </div>
+
+    <!-- Scripts -->
+    <!-- SocketIO Client for real-time updates -->
+    <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+    <script src="/js/utils/socketio-client.js"></script>
+    <script src="/js/utils/toast.js"></script>
+    <script src="/js/utils/exporter.js"></script>
+    <script src="/js/utils/search-filter.js"></script>
+    <script src="/js/utils/shortcuts.js"></script>
+    <script src="/js/utils/event-details.js"></script>
+    <script src="/js/utils/confirm-dialog.js"></script>
+    <script src="/js/utils/api-client.js"></script>
+    <script src="/js/utils/chart-config.js"></script>
+    <script src="/js/pages/dashboard.js"></script>
+    <script src="/js/pages/players.js"></script>
+    <script src="/js/pages/events.js"></script>
+    <script src="/js/pages/reports.js"></script>
+    <script src="/js/pages/server.js"></script>
+    <script src="/js/pages/settings.js"></script>
+    <script src="/js/app.js"></script>
+
+    <style>
+        /* Login Screen Styles */
+        .login-screen {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100vh;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: var(--color-bg-primary);
+            z-index: 9999;
+        }
+
+        .login-container {
+            width: 100%;
+            max-width: 400px;
+            padding: var(--spacing-lg);
+        }
+
+        .login-card {
+            animation: fadeIn 0.5s ease-out;
+        }
+
+        .login-header {
+            text-align: center;
+            margin-bottom: var(--spacing-xl);
+        }
+
+        .login-header .logo {
+            justify-content: center;
+            margin-bottom: var(--spacing-md);
+        }
+
+        .login-subtitle {
+            color: var(--color-text-secondary);
+            font-size: 1rem;
+        }
+    </style>
+</body>
+
+</html>

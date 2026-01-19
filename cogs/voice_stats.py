@@ -6,6 +6,9 @@ import datetime
 import math
 import logging
 
+# Database import
+from database.adapter import DatabaseAdapter
+
 # Logger setup
 logger = logging.getLogger('VoiceStats')
 logger.setLevel(logging.DEBUG)
@@ -13,185 +16,118 @@ handler = logging.FileHandler(filename='bot.log', encoding='utf-8', mode='a')
 handler.setFormatter(logging.Formatter('%(asctime)s [%(levelname)s] %(name)s: %(message)s'))
 logger.addHandler(handler)
 
-STATS_FILE = "voice_stats.json"
+STATS_FILE = "voice_stats.json"  # Deprecated, keeping for migration reference
 
 class VoiceStats(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.stats = self.load_stats()
-        # Anlık aktif oturumlar: {user_id: start_time(datetime)}
+        # Database adapter
+        self.db = DatabaseAdapter('sqlite:///cotabot_dev.db')
+        self.db.init_db()
+        # Active session IDs: {user_id: session_db_id}
         self.active_sessions = {}
-        self.save_stats_loop.start()
+        logger.info("VoiceStats initialized with database")
 
     def cog_unload(self):
-        self.save_stats_loop.cancel()
-        self.save_stats() # Force save on unload/restart
-        logger.info("VoiceStats unloaded and data saved.")
+        logger.info("VoiceStats unloaded.")
 
+    # Deprecated - keeping for migration script reference
     def load_stats(self):
         if not os.path.exists(STATS_FILE):
             return {}
         try:
             with open(STATS_FILE, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-            
-            # MİGRASYON KONTROLÜ: Eski format (int/float) veriyi yeni yapıya çevir
-            migrated = False
-            new_data = {}
-            for uid, value in data.items():
-                if isinstance(value, (int, float)):
-                    # Eski format: "uid": 120.5
-                    new_data[uid] = {
-                        "total_time": value,
-                        "channels": {} # Eski verinin hangi kanaldan geldiğini bilemeyiz
-                    }
-                    migrated = True
-                else:
-                    # Yeni format zaten
-                    new_data[uid] = value
-            
-            if migrated:
-                print("DEBUG: Eski veri formatı yeni yapıya dönüştürüldü.")
-                # Migrasyonu hemen kaydetmek isteyebiliriz ama save_stats çağrıldığında zaten olacak.
-                # Şimdilik memory'de kalsın, ilk update'de diske yazılır.
-            
-            return new_data
+                return json.load(f)
         except Exception as e:
-            print(f"Stats yüklenirken hata: {e}")
+            logger.error(f"Error loading stats: {e}")
             return {}
 
-    def save_stats(self):
-        with open(STATS_FILE, 'w', encoding='utf-8') as f:
-            json.dump(self.stats, f, ensure_ascii=False, indent=4)
-
-    def update_user_time(self, user_id, duration_seconds, channel_id=None, channel_name="Bilinmiyor", save=True):
-        uid = str(user_id)
-        if uid not in self.stats:
-            self.stats[uid] = {
-                "total_time": 0,
-                "balance": 0,
-                "pending_seconds": 0,
-                "channels": {}
-            }
-        
-        # Ensure migration for existing users
-        if "balance" not in self.stats[uid]: self.stats[uid]["balance"] = 0
-        if "pending_seconds" not in self.stats[uid]: self.stats[uid]["pending_seconds"] = 0
-        
-        # Genel toplamı güncelle (AFK olsa bile süre sayalım mı? Genelde evet, süre geçmişte kalsın ama ödül yok)
-        self.stats[uid]["total_time"] += duration_seconds
-        
-        # COIN SİSTEMİ (CotaSüre)
-        # AFK kanalındaysa kazanım yok
-        is_afk = channel_name == "AFK"
-        if not is_afk:
-            self.stats[uid]["pending_seconds"] += duration_seconds
-            
-            # Her 60 saniyede 1 CotaSüre
-            if self.stats[uid]["pending_seconds"] >= 60:
-                earned = int(self.stats[uid]["pending_seconds"] // 60)
-                self.stats[uid]["balance"] += earned
-                self.stats[uid]["pending_seconds"] -= (earned * 60)
-        
-        # Kanal bazlı güncelleme
-        if channel_id:
-            cid = str(channel_id)
-            if cid not in self.stats[uid]["channels"]:
-                self.stats[uid]["channels"][cid] = {
-                    "total_time": 0,
-                    "name": channel_name
-                }
-            self.stats[uid]["channels"][cid]["total_time"] += duration_seconds
-            # Kanal adını güncelle (değişmiş olabilir)
-            self.stats[uid]["channels"][cid]["name"] = channel_name
-
-        if save:
-            self.save_stats()
-
-    @tasks.loop(minutes=1)
-    async def save_stats_loop(self):
-        """Her dakika istatistikleri günceller ve kaydeder."""
-        now = datetime.datetime.now()
-        data_changed = False
-        
-        # DEBUG: Check if loop is running and detecting users
-        logger.debug(f"save_stats_loop running. Active Sessions: {len(self.active_sessions)}")
-        
-        # Aktif olan herkesi güncelle
-        # Modifikasyon hatası almamak için listeye çevirip dönüyoruz
-        for user_id, start_time in list(self.active_sessions.items()):
-            duration = (now - start_time).total_seconds()
-            
-            # Kanal bilgisini bulmaya çalış
-            guild = self.bot.guilds[0] if self.bot.guilds else None
-            member = guild.get_member(user_id) if guild else None
-            
-            c_id = None
-            c_name = "Bilinmiyor"
-            
-            if member and member.voice and member.voice.channel:
-                c_id = member.voice.channel.id
-                c_name = member.voice.channel.name
-            
-            self.update_user_time(user_id, duration, c_id, c_name, save=False)
-            
-            # Sayacı sıfırla (Şu andan itibaren tekrar saymaya başla)
-            self.active_sessions[user_id] = now
-            data_changed = True
-            
-        if data_changed:
-            self.save_stats()
-            # print("DEBUG: Periyodik kayıt tamamlandı.")
-
-    @save_stats_loop.before_loop
-    async def before_save_stats(self):
-        await self.bot.wait_until_ready()
+    # Deprecated - sessions are now tracked in database on join/leave
+    # No periodic loop needed
         
     @commands.Cog.listener()
     async def on_ready(self):
-        """Bot açıldığında seste olanları tespit et."""
-        print("DEBUG: VoiceStats taraması yapılıyor...")
+        """Bot açıldığında seste olanları tespit et ve sessions başlat."""
+        logger.info("VoiceStats scanning for active users...")
         count = 0
-        now = datetime.datetime.now()
         
         for guild in self.bot.guilds:
             for vc in guild.voice_channels:
                 for member in vc.members:
                     if not member.bot:
-                        if member.id not in self.active_sessions:
-                            self.active_sessions[member.id] = now
+                        # Start database session
+                        try:
+                            session_id = await self.db.start_voice_session(
+                                guild_id=guild.id,
+                                user_id=member.id,
+                                channel_id=vc.id,
+                                channel_name=vc.name
+                            )
+                            self.active_sessions[member.id] = session_id
                             count += 1
+                        except Exception as e:
+                            logger.error(f"Error starting session for {member.display_name}: {e}")
                             
         if count > 0:
-            print(f"DEBUG: {count} kullanıcı seste tespit edildi ve takibe alındı.")
+            logger.info(f"{count} users detected in voice and tracking started")
 
     @commands.Cog.listener()
     async def on_voice_state_update(self, member, before, after):
         if member.bot: return
 
         user_id = member.id
-        now = datetime.datetime.now()
+        guild_id = member.guild.id
         
         # 1. KANAL DEĞİŞİMİ veya ÇIKIŞ (Eski oturumu kapat)
         if before.channel is not None:
             if user_id in self.active_sessions:
-                start_time = self.active_sessions.pop(user_id)
-                duration = (now - start_time).total_seconds()
+                session_id = self.active_sessions.pop(user_id)
                 
-                # Hangi kanaldan çıktıysa oraya yaz
-                self.update_user_time(user_id, duration, before.channel.id, before.channel.name, save=False)
+                # Calculate coins earned (1 coin per 60 seconds, AFK channel = 0)
+                is_afk = before.channel.name == "AFK"
                 
-                print(f"DEBUG: Session ended for {member.display_name}. Channel: {before.channel.name}. Duration: {duration}s.")
-            else:
-                # Bot yeniden başladığında veya session kaybolduğunda buraya düşebilir.
-                pass
+                try:
+                    # End session in database
+                    duration = await self.db.end_voice_session(session_id, coins_earned=0)
+                    
+                    # Update balance
+                    if not is_afk and duration > 0:
+                        coins_earned = int(duration // 60)
+                        pending_secs = duration % 60
+                        
+                        await self.db.update_voice_balance(
+                            guild_id=guild_id,
+                            user_id=user_id,
+                            coins_delta=coins_earned,
+                            pending_secs_delta=pending_secs,
+                            duration_delta=duration
+                        )
+                    else:
+                        # AFK or no time - just update total time
+                        await self.db.update_voice_balance(
+                            guild_id=guild_id,
+                            user_id=user_id,
+                            duration_delta=duration if duration > 0 else 0
+                        )
+                    
+                    logger.debug(f"Session ended: {member.display_name} in {before.channel.name}, {duration:.1f}s")
+                except Exception as e:
+                    logger.error(f"Error ending session: {e}")
 
         # 2. GİRİŞ (Yeni oturum başlat)
         if after.channel is not None:
-            # Sadece girişte veya kanal değişiminde
-            if before.channel != after.channel:
-                self.active_sessions[user_id] = now
-                print(f"DEBUG: Session started for {member.display_name} in {after.channel.name} at {now}.")
+            if before.channel != after.channel:  # New join or channel switch
+                try:
+                    session_id = await self.db.start_voice_session(
+                        guild_id=guild_id,
+                        user_id=user_id,
+                        channel_id=after.channel.id,
+                        channel_name=after.channel.name
+                    )
+                    self.active_sessions[user_id] = session_id
+                    logger.debug(f"Session started: {member.display_name} in {after.channel.name}")
+                except Exception as e:
+                    logger.error(f"Error starting session: {e}")
 
     def format_duration(self, seconds):
         if seconds < 60:
@@ -211,76 +147,73 @@ class VoiceStats(commands.Cog):
         """Kullanıcının detaylı ses istatistiğini gösterir."""
         try:
             target = member or ctx.author
-            uid = str(target.id)
+            guild_id = ctx.guild.id
             
-            user_data = self.stats.get(uid, {"total_time": 0, "channels": {}})
-            total_seconds = user_data["total_time"]
+            # Get stats from database
+            stats = await self.db.get_user_voice_stats(guild_id, target.id)
+            balance_obj = await self.db.get_voice_balance(guild_id, target.id)
             
-            # Eğer şu an seste ise, aktif süreyi de ekle (Hesaplamada kolaylık olsun diye genel toplama ekliyoruz)
-            current_session_seconds = 0
-            current_channel_id = None
+            total_seconds = stats["total_seconds"]
+            
+            # Add active session time if currently in voice
+            active_session_seconds = 0
             if target.id in self.active_sessions:
-                current_session_seconds = (datetime.datetime.now() - self.active_sessions[target.id]).total_seconds()
-                if target.voice and target.voice.channel:
-                    current_channel_id = str(target.voice.channel.id)
+                # Get session from database would be ideal, but we can calculate from local start time if needed
+                # For accuracy, let's just use what we have in DB + current delta if we track start time locally
+                # But active_sessions now holds DB ID, not start time.
+                # So we fetch active session from DB
+                session = await self.db.get_active_session(guild_id, target.id)
+                if session:
+                    active_session_seconds = (datetime.datetime.now() - session.joined_at).total_seconds()
+                    total_seconds += active_session_seconds
             
-            final_total = total_seconds + current_session_seconds
-            formatted_total = self.format_duration(final_total)
+            formatted_total = self.format_duration(total_seconds)
 
             embed = discord.Embed(
-                title=f"📊 Ses İstatistiği: {target.display_name}",
+                title=f"📊 Ses İstatistikleri: {target.display_name}",
                 color=discord.Color.green()
             )
             embed.set_thumbnail(url=target.display_avatar.url)
             embed.add_field(name="Toplam Süre", value=f"**{formatted_total}**", inline=False)
             
             # En çok vakit geçirilen kanallar (Top 5)
-            channels_data = user_data.get("channels", {})
+            channels_data = stats.get("channels", {})
             
-            # Aktif oturumu kanallara yansıt (Sadece gösterim için geçici kopya)
-            if current_session_seconds > 0 and current_channel_id:
-                # Mevcut veriyi kopyala ki orjinal bozulmasın
-                import copy
-                channels_data = copy.deepcopy(channels_data)
-                
-                if current_channel_id not in channels_data:
-                    channels_data[current_channel_id] = {"total_time": 0, "name": target.voice.channel.name}
-                
-                channels_data[current_channel_id]["total_time"] += current_session_seconds
-
             if channels_data:
                 # Sırala
                 sorted_channels = sorted(
                     channels_data.items(), 
-                    key=lambda item: item[1]['total_time'], 
+                    key=lambda item: item[1]['seconds'], 
                     reverse=True
                 )
                 
                 top_channels_text = ""
                 for i, (cid, cdata) in enumerate(sorted_channels[:5], 1):
                     c_name = cdata['name']
-                    c_time = self.format_duration(cdata['total_time'])
+                    c_time = self.format_duration(cdata['seconds'])
                     top_channels_text += f"**{i}.** {c_name}: `{c_time}`\n"
                 
                 embed.add_field(name="En Çok Takılınan Kanallar", value=top_channels_text, inline=False)
 
-            if current_session_seconds > 0:
+            if active_session_seconds > 0:
                 embed.set_footer(text="🟢 Şu an aktif (Süreler dahil edildi)")
                 
             await ctx.send(embed=embed)
         except Exception as e:
             await ctx.send(f"❌ Stat komutunda hata: {e}")
-            print(f"Stat Error: {e}")
+            logger.error(f"Stat Error: {e}", exc_info=True)
 
     @commands.command(name='cüzdan', aliases=['wallet', 'coin', 'bakiye'])
     async def cuzdan(self, ctx, member: discord.Member = None):
         """Mevcut CotaSüre (bakiye) durumunu gösterir."""
         target = member or ctx.author
-        uid = str(target.id)
-        user_data = self.stats.get(uid, {})
+        guild_id = ctx.guild.id
         
-        balance = user_data.get("balance", 0)
-        total_time = user_data.get("total_time", 0)
+        # Get balance from database
+        balance_obj = await self.db.get_voice_balance(guild_id, target.id)
+        
+        balance = balance_obj.balance
+        total_time = balance_obj.total_time_seconds
         formatted_time = self.format_duration(total_time)
         
         embed = discord.Embed(
@@ -305,32 +238,30 @@ class VoiceStats(commands.Cog):
             await ctx.send("❌ Kendine transfer yapamazsın.")
             return
 
-        sender_uid = str(ctx.author.id)
-        receiver_uid = str(recipient.id)
+        guild_id = ctx.guild.id
         
-        # Gönderen kontrolü
-        sender_data = self.stats.get(sender_uid, {})
-        current_balance = sender_data.get("balance", 0)
+        # Check balance
+        sender_balance = await self.db.get_voice_balance(guild_id, ctx.author.id)
         
-        if current_balance < amount:
-            await ctx.send(f"❌ Yetersiz bakiye. Mevcut: {current_balance} CotaSüre")
+        if sender_balance.balance < amount:
+            await ctx.send(f"❌ Yetersiz bakiye. Mevcut: {sender_balance.balance} CotaSüre")
             return
-            
-        # Alıcı verisi oluştur (Yoksa)
-        if receiver_uid not in self.stats:
-            self.stats[receiver_uid] = { "total_time": 0, "balance": 0, "pending_seconds": 0, "channels": {} }
-        if "balance" not in self.stats[receiver_uid]: self.stats[receiver_uid]["balance"] = 0
         
-        # İşlem
-        self.stats[sender_uid]["balance"] -= amount
-        self.stats[receiver_uid]["balance"] += amount
+        # Transfer coins
+        success = await self.db.transfer_voice_coins(
+            guild_id=guild_id,
+            sender_id=ctx.author.id,
+            receiver_id=recipient.id,
+            amount=amount
+        )
         
-        self.save_stats()
-        
-        await ctx.send(f"✅ Başarılı! **{recipient.display_name}** kullanıcısına **{amount} CotaSüre** gönderildi.\n"
-                       f"📉 Yeni Bakiyen: {self.stats[sender_uid]['balance']}")
-
-        await ctx.send(embed=embed)
+        if success:
+            # Get updated balance
+            new_balance = await self.db.get_voice_balance(guild_id, ctx.author.id)
+            await ctx.send(f"✅ Başarılı! **{recipient.display_name}** kullanıcısına **{amount} CotaSüre** gönderildi.\n"
+                           f"📉 Yeni Bakiyen: {new_balance.balance}")
+        else:
+            await ctx.send("❌ Transfer başarısız.")
 
     @commands.command(name='debug_sessions')
     async def debug_sessions(self, ctx):
@@ -338,40 +269,33 @@ class VoiceStats(commands.Cog):
         if not ctx.author.guild_permissions.administrator: return
         
         active_count = len(self.active_sessions)
-        msg = f"🔍 **Aktif Oturumlar:** {active_count}\n"
-        for uid, start in self.active_sessions.items():
+        msg = f"🔍 **Aktif Oturumlar (DB IDs):** {active_count}\n"
+        for uid, session_id in self.active_sessions.items():
             member = ctx.guild.get_member(uid)
             name = member.display_name if member else f"Unknown ({uid})"
-            duration = (datetime.datetime.now() - start).total_seconds()
-            msg += f"- {name}: {int(duration)}s\n"
+            msg += f"- {name}: Session #{session_id}\n"
             
         await ctx.send(msg)
 
     @commands.command(name='top10')
     async def top10(self, ctx):
         """Sunucudaki en çok ses süresine sahip 10 kişiyi gösterir."""
-        if not self.stats:
+        guild_id = ctx.guild.id
+        
+        # Get leaderboard from database
+        leaderboard = await self.db.get_voice_leaderboard(guild_id, limit=10)
+        
+        if not leaderboard:
             await ctx.send("Henüz kayıtlı istatistik yok.")
             return
 
-        # Sırala (Azalan) - Yeni yapıda "total_time" alanına göre
-        sorted_stats = sorted(
-            self.stats.items(), 
-            key=lambda item: item[1].get('total_time', 0) if isinstance(item[1], dict) else item[1], 
-            reverse=True
-        )
-        top_list = sorted_stats[:10]
-
         description_lines = []
-        for index, (uid, data) in enumerate(top_list, 1):
-            # Yapı kontrolü
-            if isinstance(data, dict):
-                seconds = data.get('total_time', 0)
-            else:
-                seconds = data # Eski format kalıntısı varsa
+        for index, entry in enumerate(leaderboard, 1):
+            user_id = entry["user_id"]
+            seconds = entry["total_seconds"]
             
-            user = ctx.guild.get_member(int(uid))
-            name = user.display_name if user else f"Kullanıcı ({uid})"
+            user = ctx.guild.get_member(user_id)
+            name = user.display_name if user else f"Kullanıcı ({user_id})"
             time_str = self.format_duration(seconds)
             
             medal = ""

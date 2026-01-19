@@ -30,54 +30,83 @@ class Status(commands.Cog):
 
     @commands.command(name='bot_durum')
     async def system_status(self, ctx):
-        """Botun ve modüllerin genel sağlık durumunu gösterir."""
+        """Botun ve modüllerin detaylı sağlık durumunu gösterir."""
         if not await self.check_permissions(ctx): return
+        
+        status_msg = await ctx.send("🏥 **Durum analizi yapılıyor...**")
 
-        embed = discord.Embed(title="🏥 Bot Sağlık Durumu", color=discord.Color.blue())
-        embed.set_footer(text=f"Sorgu: {datetime.datetime.now().strftime('%H:%M:%S')}")
+        embed = discord.Embed(title="🏥 Cotabot Sistem Durumu", color=discord.Color.blue())
+        embed.set_footer(text=f"Analiz Zamanı: {datetime.datetime.now().strftime('%H:%M:%S')}")
+        embed.set_thumbnail(url=self.bot.user.display_avatar.url)
 
         # 1. API & Latency
         latency_ms = round(self.bot.latency * 1000)
         status_icon = "🟢" if latency_ms < 200 else ("🟡" if latency_ms < 500 else "🔴")
-        embed.add_field(name="📶 Bağlantı (Ping)", value=f"{status_icon} `{latency_ms}ms`", inline=True)
-
-        # 2. Database Check
-        db_status = "🔴 Okunamadı"
-        if os.path.exists("squad_db.json"):
-            try:
-                with open("squad_db.json", "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    count = len(data.get("players", []))
-                    db_status = f"🟢 Aktif ({count} Kayıt)"
-            except:
-                db_status = "🟡 Bozuk JSON"
-        else:
-            db_status = "⚪ Dosya Yok"
-        embed.add_field(name="💾 Veritabanı", value=db_status, inline=True)
+        embed.add_field(name="📶 API Gecikmesi", value=f"{status_icon} `{latency_ms}ms`", inline=True)
         
-        # Spacer
-        embed.add_field(name="\u200b", value="\u200b", inline=True)
-
-        # 3. Module Status (Loops)
-        # Squad Modules
-        squad_server = self.bot.get_cog('SquadServer')
+        # 2. Database Connection
+        db_status = "🔴 Bağlantı Yok"
+        db_details = "N/A"
+        
         squad_players = self.bot.get_cog('SquadPlayers')
+        db = getattr(squad_players, 'db', None) if squad_players else None
         
-        server_txt = "⚪ Yüklü Değil"
-        players_txt = "⚪ Yüklü Değil"
+        if db:
+            try:
+                # Active Ping Test
+                start = time.time()
+                # Simple query to check responsiveness
+                await db.get_player_by_steam_id("0") 
+                db_latency = round((time.time() - start) * 1000)
+                
+                db_status = f"🟢 Aktif (`{db_latency}ms`)"
+                
+                # Fetch Counts
+                p_count = len(await db.get_all_players())
+                active_events = len(await db.get_active_events(ctx.guild.id)) if ctx.guild else 0
+                
+                db_details = f"👥 **Oyuncula:** {p_count}\n📅 **Aktif Etkinlik:** {active_events}"
+            except Exception as e:
+                db_status = f"🟡 Hata: {str(e)[:20]}"
         
+        embed.add_field(name="💾 Veritabanı", value=db_status, inline=True)
+        embed.add_field(name="📚 Veri Özeti", value=db_details, inline=True)
+
+        # 3. Module Status & Loops
+        squad_server = self.bot.get_cog('SquadServer')
+        
+        modules_text = ""
+        
+        # Squad Server
         if squad_server:
-            live_loop = "🟢" if squad_server.live_panel_loop.is_running() else "🔴"
-            server_txt = f"Live Panel: {live_loop}"
-
+            loop_status = "🟢 Çalışıyor" if squad_server.live_panel_loop.is_running() else "🔴 Durmuş"
+            modules_text += f"**Squad Server:** {loop_status}\n"
+        else:
+            modules_text += "**Squad Server:** ⚪ Yüklü Değil\n"
+            
+        # Squad Players
         if squad_players:
-            auto_sync = "🟢" if squad_players.auto_sync_loop.is_running() else "🔴"
-            activity_loop = "🟢" if squad_players.activity_panel_loop.is_running() else "🔴"
-            players_txt = f"Sync: {auto_sync} | Activity: {activity_loop}"
-
-        embed.add_field(name="🎮 Squad Sunucu", value=server_txt, inline=True)
-        embed.add_field(name="👥 Squad Oyuncu", value=players_txt, inline=True)
-        embed.add_field(name="\u200b", value="\u200b", inline=False) # Newline
+            track_status = "🟢 Çalışıyor" if squad_players.activity_tracker_loop.is_running() else "🔴 Durmuş"
+            sync_status = "🟢 Çalışıyor" if squad_players.auto_sync_loop.is_running() else "🔴 Durmuş"
+            
+            modules_text += f"**Aktivite Takip:** {track_status}\n"
+            modules_text += f"**Auto Sync:** {sync_status}\n"
+            
+            # Last Activity Log check
+            if hasattr(squad_players, 'json_mode'):
+                mode = "JSON (Eski)" if squad_players.json_mode else "SQLite (Yeni)"
+                modules_text += f"**Mod:** {mode}"
+        else:
+            modules_text += "**Squad Players:** ⚪ Yüklü Değil"
+            
+        embed.add_field(name="⚙️ Modüller ve Döngüler", value=modules_text, inline=False)
+        
+        # 4. System Info
+        import platform
+        sys_info = f"Python: {platform.python_version()}\nOS: {platform.system()} {platform.release()}"
+        embed.add_field(name="💻 Sistem", value=sys_info, inline=True)
+        
+        await status_msg.edit(content=None, embed=embed)
 
         # Event Module
         event_cog = self.bot.get_cog('Event')

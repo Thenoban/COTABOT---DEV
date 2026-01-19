@@ -1,16 +1,11 @@
 import discord
 from discord.ext import commands, tasks
-import json
 import os
 import datetime
 import asyncio
 
 # Database import
 from database.adapter import DatabaseAdapter
-
-# Dosya yolları (deprecated - using database now)
-EVENTS_FILE = "events.json"
-HISTORY_FILE = "event_history.json"
 
 # Auth Constants
 from .utils.config import ADMIN_USER_IDS, ADMIN_ROLE_IDS, CLAN_MEMBER_ROLE_IDS, COLORS, DEV_MODE, MANAGER_USER_IDS, MANAGER_ROLE_IDS
@@ -20,6 +15,21 @@ import logging
 from exceptions import DiscordOperationError, DataError, JSONParseError
 
 logger = logging.getLogger("Event")
+
+# SocketIO broadcast for web admin panel
+try:
+    import sys
+    from pathlib import Path
+    web_admin_path = Path(__file__).parent.parent / "web_admin"
+    if str(web_admin_path) not in sys.path:
+        sys.path.insert(0, str(web_admin_path))
+    from socketio_handler import broadcast_event
+    SOCKETIO_AVAILABLE = True
+    logger.info("✅ SocketIO broadcast available for web admin")
+except ImportError:
+    SOCKETIO_AVAILABLE = False
+    broadcast_event = None
+    logger.info("ℹ️ SocketIO broadcast not available (web admin may not be running)")
 
 # Türkiye Saati (+3)
 TR_TIMEZONE = datetime.timezone(datetime.timedelta(hours=3))
@@ -235,17 +245,23 @@ class EventEditModal(discord.ui.Modal, title="Etkinliği Düzenle"):
         
         cog = self.bot.get_cog("Event")
         if cog:
-            server_id = str(interaction.guild.id)
-            if server_id in cog.events:
-                for event in cog.events[server_id]:
-                    if event["message_id"] == self.message.id:
-                        event["title"] = self.event_title.value
-                        event["timestamp"] = local_time.isoformat()
-                        event["end_timestamp"] = local_end_time.isoformat() if local_end_time else None
-                        event["reminder_sent"] = False 
-                        event["reminder_sent"] = False 
-                        break
-                await cog.save_events()
+            # Find event in database by message_id
+            guild_id = interaction.guild.id
+            event_obj = await cog.db.get_event_by_message_id(guild_id, self.message.id)
+            
+            if event_obj:
+                # Update event in database
+                await cog.db.update_event(
+                    event_db_id=event_obj.id,
+                    title=self.event_title.value,
+                    description=desc_text,
+                    timestamp=local_time,
+                    reminder_sent=False  # Reset reminder when editing
+                )
+                
+                # Reload events from database to sync memory
+                cog.events = await cog.load_events_from_db()
+                logger.info(f"Event #{event_obj.event_id} updated in database")
         
         await interaction.response.send_message(f"✅ Etkinlik güncellendi!", ephemeral=True)
         
@@ -354,7 +370,7 @@ class EventView(discord.ui.View):
             server_id = str(interaction.guild.id)
             guild_id = interaction.guild.id
             
-            # Find event in database by message_id
+            # Find event in memory first
             event_dict = None
             if server_id in cog.events:
                 for event in cog.events[server_id]:
@@ -362,13 +378,24 @@ class EventView(discord.ui.View):
                         event_dict = event
                         break
             
+            # If not in memory, try database by message_id
+            if not event_dict:
+                event_obj = await cog.db.get_event_by_message_id(guild_id, interaction.message.id)
+                if event_obj:
+                    # Convert to dict format
+                    event_dict = {
+                        "db_id": event_obj.id,
+                        "event_id": event_obj.event_id,
+                        "message_id": event_obj.message_id,
+                        "title": event_obj.title
+                    }
+            
             if event_dict:
                 # Update participants in database
-                # Extract user_id from mention
                 user_id = interaction.user.id
                 
                 await cog.db.add_event_participant(
-                    event_db_id=event_dict.get("db_id"),  # We need to store this
+                    event_db_id=event_dict.get("db_id"),
                     user_id=user_id,
                     user_mention=user_mention,
                     status=status if status != "join" else "attendee",
@@ -377,6 +404,22 @@ class EventView(discord.ui.View):
                 
                 # Reload events from database
                 cog.events = await cog.load_events_from_db()
+                
+                # Broadcast to web admin panel for real-time updates
+                if SOCKETIO_AVAILABLE and broadcast_event:
+                    try:
+                        broadcast_event('event_participant_update', {
+                            'event_id': event_dict.get("event_id"),
+                            'db_id': event_dict.get("db_id"),
+                            'action': 'participant_update',
+                            'user_id': str(user_id),
+                            'username': interaction.user.display_name,
+                            'status': status if status != "join" else "attendee",
+                            'reason': reason
+                        })
+                        logger.info(f"📡 Broadcasted participant update for event #{event_dict.get('event_id')}")
+                    except Exception as e:
+                        logger.warning(f"Failed to broadcast event update to web: {e}")
 
         await self.log_action(interaction, action_text)
 
@@ -503,12 +546,19 @@ class EventView(discord.ui.View):
         
         cog = interaction.client.get_cog("Event")
         found_event = None
-        server_id = str(interaction.guild.id)
-        if cog and server_id in cog.events:
-            for event in cog.events[server_id]:
-                if event["message_id"] == interaction.message.id:
-                    found_event = event
-                    break
+        guild_id = interaction.guild.id
+        
+        # Get event from database
+        if cog:
+            event_obj = await cog.db.get_event_by_message_id(guild_id, interaction.message.id)
+            if event_obj:
+                # Convert to dict for compatibility
+                found_event = {
+                    "db_id": event_obj.id,
+                    "event_id": event_obj.event_id,
+                    "title": event_obj.title,
+                    "author_id": event_obj.creator_id
+                }
         
         if found_event and interaction.user.id == found_event.get("author_id"): has_permission = True
 
@@ -516,10 +566,12 @@ class EventView(discord.ui.View):
             await interaction.response.send_message("Bu işlem için yetkiniz yok", ephemeral=True)
             return
 
-        # Remove event from list FIRST
-        if found_event:
-            cog.events[server_id].remove(found_event)
-            await cog.save_events()
+        # Deactivate event in database
+        if found_event and cog:
+            await cog.db.deactivate_event(found_event["db_id"])
+            # Reload events from database to sync memory
+            cog.events = await cog.load_events_from_db()
+            logger.info(f"Event #{found_event['event_id']} deactivated in database")
         
         event_title = found_event.get("title", "Bilinmeyen Etkinlik") if found_event else "Bilinmeyen Etkinlik"
         
@@ -535,7 +587,7 @@ class EventView(discord.ui.View):
         try:
             await interaction.message.delete()
         except DiscordOperationError as e:
-            # Message deletion failed, but event is already removed from list
+            # Message deletion failed, but event is already deactivated
             logger.warning(f"Could not delete event message: {e}")
 
     @discord.ui.button(label="Yoklama Al", style=discord.ButtonStyle.gray, emoji="📋", row=1, custom_id="event_attendance")
@@ -583,6 +635,79 @@ class EventView(discord.ui.View):
         report_embed.add_field(name=f"⚠️ Davetsizler ({len(present_unsigned)})", value=format_list(present_unsigned), inline=False)
         report_embed.add_field(name=f"❌ Kaçaklar ({len(absent_signed)})", value=format_list(absent_signed), inline=False)
         await interaction.response.send_message(embed=report_embed, ephemeral=True)
+
+    @discord.ui.button(label="Tik Yok", style=discord.ButtonStyle.secondary, emoji="📢", row=1, custom_id="event_tikyok")
+    async def tikyok_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        
+        has_permission = False
+        if interaction.user.guild_permissions.administrator: has_permission = True
+        elif interaction.user.id in ADMIN_USER_IDS: has_permission = True
+        else:
+            role_list_empty = not ADMIN_ROLE_IDS or all(id == 0 for id in ADMIN_ROLE_IDS)
+            user_list_empty = not ADMIN_USER_IDS
+            if role_list_empty and user_list_empty: has_permission = True
+            else:
+                for role in interaction.user.roles:
+                    if role.id in ADMIN_ROLE_IDS:
+                        has_permission = True; break
+        
+        if not has_permission:
+            # Also allow managers (unlike other admin actions, tikyok might be useful for managers too)
+            # Checking manager permissions
+            is_manager = interaction.user.id in MANAGER_USER_IDS
+            if not is_manager and MANAGER_ROLE_IDS:
+                for role in interaction.user.roles:
+                    if role.id in MANAGER_ROLE_IDS:
+                        is_manager = True; break
+            
+            if not is_manager:
+                await interaction.response.send_message("❌ Yetkiniz yok.", ephemeral=True)
+                return
+
+        # TikYok Logic
+        embed = interaction.message.embeds[0]
+        all_reactors = []
+        def extract_mentions(field_val):
+            if field_val == "-": return []
+            return field_val.split("\n")
+
+        for i in range(3):
+            if len(embed.fields) > i:
+                users = extract_mentions(embed.fields[i].value)
+                all_reactors.extend(users)
+        
+        reacted_set = set(all_reactors)
+        target_members = set()
+        group_name = "Klan Üyeleri (Varsayılan)"
+        
+        # Default to Clan Roles
+        found_roles = 0
+        for r_id in CLAN_MEMBER_ROLE_IDS:
+            r_obj = interaction.guild.get_role(r_id)
+            if r_obj:
+                target_members.update(r_obj.members)
+                found_roles += 1
+        
+        if found_roles == 0:
+            await interaction.response.send_message("⚠️ Varsayılan roller (CLAN_MEMBER_ROLE_IDS) sunucuda bulunamadı veya yapılandırılmadı.", ephemeral=True)
+            return
+
+        missing_members = []
+        for member in target_members:
+            if member.bot: continue
+            if member.mention not in reacted_set:
+                missing_members.append(member)
+
+        if not missing_members:
+            await interaction.response.send_message(f"✅ **{group_name}** grubundaki herkes tepki vermiş!", ephemeral=True)
+        else:
+            missing_list = "\n".join([m.mention for m in missing_members])
+            result_embed = discord.Embed(
+                title=f"⚠️ {group_name} - Tepki Vermeyenler ({len(missing_members)})",
+                description=missing_list if len(missing_list) < 4000 else "Liste çok uzun...",
+                color=discord.Color.orange()
+            )
+            await interaction.response.send_message(embed=result_embed, ephemeral=True)
 
 
 class EventManageActionsView(discord.ui.View):
@@ -638,17 +763,43 @@ class EventManageActionsView(discord.ui.View):
 
         cog = self.bot.get_cog("Event")
         if cog:
-            server_id = str(interaction.guild.id)
-            if server_id in cog.events:
-                await cog.archive_event(self.event_data, interaction.guild)
-                try:
-                    cog.events[server_id].remove(self.event_data)
-                    await cog.save_events()
-                except ValueError: pass
+            guild_id = interaction.guild.id
+            # Get event from database by message_id
+            event_obj = await cog.db.get_event_by_message_id(guild_id, self.message.id)
+            
+            if event_obj:
+                # Archive event first (convert to dict format for archive function)
+                event_dict = {
+                    "db_id": event_obj.id,
+                    "event_id": event_obj.event_id,
+                    "title": event_obj.title,
+                    "attendees": [],
+                    "declined": [],
+                    "tentative": []
+                }
+                
+                # Load participants into dict format
+                if event_obj.participants:
+                    for p in event_obj.participants:
+                        if p.status == "attendee":
+                            event_dict["attendees"].append(p.user_mention)
+                        elif p.status == "declined":
+                            event_dict["declined"].append(p.user_mention)
+                        elif p.status == "tentative":
+                            event_dict["tentative"].append(p.user_mention)
+                
+                await cog.archive_event(event_dict, interaction.guild)
+                
+                # Deactivate event in database
+                await cog.db.deactivate_event(event_obj.id)
+                # Reload events from database to sync memory
+                cog.events = await cog.load_events_from_db()
+                logger.info(f"Event #{event_obj.event_id} archived and deactivated")
         
         log_channel = discord.utils.get(interaction.guild.text_channels, name="etkinlik-log")
         if log_channel:
-             await log_channel.send(f"🗑️ **Etkinlik Kapatıldı/Arşivlendi:** {self.event_data['title']} (Yöneten: {interaction.user.display_name})")
+             event_title = self.event_data.get('title', 'Bilinmeyen')
+             await log_channel.send(f"🗑️ **Etkinlik Kapatıldı/Arşivlendi:** {event_title} (Yöneten: {interaction.user.display_name})")
 
         try:
             await self.message.delete()
@@ -813,29 +964,10 @@ class Event(commands.Cog):
             logger.error(f"Error loading events from database: {e}", exc_info=True)
             return {}
 
-    async def save_events(self):
-        """Deprecated - events are saved directly to database now"""
-        logger.warning("save_events() called but events are now saved directly to database")
-        pass
-            
-    async def load_history(self):
-        """Deprecated - history in database"""
-        return {}
 
-    async def save_history(self):
-        """Deprecated - history in database"""
-        pass
-
-    def _read_json(self, filename):
-        """Deprecated - using database"""
-        with open(filename, 'r', encoding='utf-8') as f: return json.load(f)
-
-    def _write_json(self, filename, data):
-        """Deprecated - using database"""
-        with open(filename, 'w', encoding='utf-8') as f:
-            json.dump(data, f, ensure_ascii=False, indent=4)
 
     async def archive_event(self, event, guild):
+        """Archive event - Database already marks event as inactive"""
         server_id = str(guild.id)
         attendees = event.get("attendees", [])
         declined = event.get("declined", [])
@@ -859,18 +991,15 @@ class Event(commands.Cog):
             if member.mention not in all_interacted:
                 missing_members.append(member.mention)
         
-        archived_data = event.copy()
-        archived_data["archived_at"] = datetime.datetime.now().isoformat()
-        archived_data["final_stats"] = {
-            "attendees": attendees,
-            "declined": declined,
-            "tentative": tentative,
-            "missing": missing_members
-        }
+        # Log archive stats
+        logger.info(
+            f"Event '{event.get('title')}' archived: "
+            f"{len(attendees)} attended, {len(declined)} declined, "
+            f"{len(tentative)} tentative, {len(missing_members)} missing"
+        )
         
-        if server_id not in self.history: self.history[server_id] = []
-        self.history[server_id].append(archived_data)
-        await self.save_history()
+        # Database already has the event marked as inactive (active=False)
+        # No need to write to JSON history file anymore
 
     @tasks.loop(seconds=60)
     async def check_reminders(self):
@@ -947,12 +1076,16 @@ class Event(commands.Cog):
                                 except Exception as e:
                                     logger.error(f"DM Error ({member.display_name}): {e}")
 
-                    # 3. İşaretle ve Kaydet
-                    event["reminder_sent"] = True
-                    data_changed = True
+                    # 3. Update reminder status in database
+                    event_db_id = event.get("db_id")
+                    if event_db_id:
+                        await self.db.update_reminder_status(event_db_id, True)
+                        logger.info(f"Reminder sent for event #{event.get('event_id')}")
+                        data_changed = True
         
         if data_changed:
-            await self.save_events()
+            # Reload events from database to sync memory
+            self.events = await self.load_events_from_db()
 
     @check_reminders.before_loop
     async def before_check_reminders(self):
@@ -961,40 +1094,49 @@ class Event(commands.Cog):
     @commands.Cog.listener()
     async def on_ready(self):
         self.bot.add_view(EventView())
-        await self.migrate_legacy_events()
-        print(f'Event Cog hazır ve View yüklendi.')
-
-    async def migrate_legacy_events(self):
-        data_changed = False
-        for server_id, events_list in self.events.items():
-            current_ids = [e.get("event_id", 0) for e in events_list]
-            max_id = max(current_ids) if current_ids else 0
-            for event in events_list:
-                if "event_id" not in event:
-                    max_id += 1
-                    event["event_id"] = max_id
-                    data_changed = True
-        if data_changed: await self.save_events()
+        logger.info('Event Cog ready and View loaded.')
 
     @commands.command(name='etkinlikler', aliases=['events'])
     async def list_events(self, ctx):
         try:
-            server_id = str(ctx.guild.id)
-            if server_id not in self.events or not self.events[server_id]:
-                await ctx.send("📭 Aktif etkinlik bulunmuyor.")
+            # Fetch events from DB (Active + Archived, limit 25)
+            # Use get_all_events
+            events_obj = await self.db.get_all_events(ctx.guild.id, limit=25)
+            
+            if not events_obj:
+                await ctx.send("📭 Kayıtlı etkinlik bulunmuyor.")
                 return
 
-            sorted_events = sorted(self.events[server_id], key=lambda x: x.get("timestamp", ""))
+            events_list = []
+            for event in events_obj:
+                # Convert database event to dict format for compatibility
+                event_dict = {
+                    "db_id": event.id,
+                    "event_id": event.event_id,
+                    "message_id": event.message_id,
+                    "channel_id": event.channel_id,
+                    "author_id": event.creator_id,
+                    "title": event.title,
+                    "timestamp": event.timestamp.isoformat() if event.timestamp else "",
+                    "description": event.description or "",
+                    "attendees": [],
+                    "declined": [],
+                    "tentative": [],
+                    "reminder_sent": event.reminder_sent,
+                    "active": event.active
+                }
+                
+                if event.participants:
+                    for p in event.participants:
+                        if p.status == "attendee": event_dict["attendees"].append(p.user_mention)
+                        elif p.status == "declined": event_dict["declined"].append(p.user_mention)
+                        elif p.status == "tentative": event_dict["tentative"].append(p.user_mention)
+                
+                events_list.append(event_dict)
             
-            # Debug: Check for duplicate event_ids
-            event_ids = [e.get("event_id") for e in sorted_events]
-            logger.info(f"Event IDs in list: {event_ids}")
-            if len(event_ids) != len(set(event_ids)):
-                logger.warning(f"DUPLICATE EVENT IDS DETECTED: {event_ids}")
-            
-            embed = discord.Embed(title="📅 Aktif Etkinlikler", color=discord.Color(COLORS.INFO))
+            embed = discord.Embed(title="📅 Etkinlik Listesi (Son 25)", color=discord.Color(COLORS.INFO))
             desc = ""
-            for event in sorted_events:
+            for event in events_list:
                 dt_str = "Bilinmiyor"
                 try:
                     dt = datetime.datetime.fromisoformat(event["timestamp"])
@@ -1002,111 +1144,27 @@ class Event(commands.Cog):
                 except: pass
                 
                 e_id = event.get("event_id", "?")
+                status = "🟢" if event.get("active") else "🔴"
                 msg_link = f"https://discord.com/channels/{ctx.guild.id}/{event['channel_id']}/{event['message_id']}"
                 
-                line = f"**#{e_id}** - [{event['title']}]({msg_link}) (`{dt_str}`)\n"
+                line = f"{status} **#{e_id}** - [{event['title']}]({msg_link}) (`{dt_str}`)\n"
                 if len(desc) + len(line) > 4000:
                     desc += "...ve daha fazlası"
                     break
                 desc += line
                 
             embed.description = desc
-            view = EventListView(self.bot, sorted_events)
+            embed.set_footer(text="🟢 Aktif | 🔴 Arşivlenmiş/Pasif")
+            
+            # Use View with Select Menu to manage ANY event in the list
+            view = EventListView(self.bot, events_list)
             await ctx.send(embed=embed, view=view)
         except Exception as e:
             await ctx.send(f"❌ Komut çalıştırılırken hata: {e}")
             logger.error(f"List events error: {e}", exc_info=True)
 
 
-    @commands.command(name='etkinlik')
-    async def etkinlik_info(self, ctx, event_id: int = None):
-        if event_id is None:
-            await ctx.send("ℹ️ Kullanım: `!etkinlik <Etkinlik ID>`\nID'leri görmek için `!etkinlikler` yazın.")
-            return
-        server_id = str(ctx.guild.id)
-        if server_id not in self.events: self.events[server_id] = []
-
-        target_event = None
-        for event in self.events.get(server_id, []):
-            if event.get("event_id") == event_id:
-                target_event = event
-                break
-        
-        is_history = False
-        if not target_event:
-            if server_id in self.history:
-                for h_event in self.history[server_id]:
-                    if h_event.get("event_id") == event_id:
-                        target_event = h_event
-                        is_history = True
-                        break
-        
-        if not target_event:
-            await ctx.send(f"❌ ID'si **#{event_id}** olan aktif veya arşivlenmiş bir etkinlik bulunamadı.")
-            return
-            
-        try:
-            embed_title = f"📊 Etkinlik Raporu: {target_event['title']}"
-            if is_history: embed_title += " (ARŞİV)"
-            
-            report_embed = discord.Embed(
-                title=embed_title,
-                description=f"**ID:** #{event_id}\n**Zaman:** <t:{int(datetime.datetime.fromisoformat(target_event['timestamp']).timestamp())}:F>",
-                color=discord.Color(COLORS.INFO) if is_history else discord.Color(COLORS.INFO)
-            )
-            
-            if is_history:
-                stats = target_event.get("final_stats", {})
-                attendees = stats.get("attendees", [])
-                declined = stats.get("declined", [])
-                tentative = stats.get("tentative", [])
-                missing = stats.get("missing", [])
-                
-                def fmt_list(l):
-                    if not l: return "-"
-                    text = "\n".join(l)
-                    if len(text) > 1000:
-                        c = text[:1000].count('\n')
-                        return text[:1000] + f"\n...ve {len(l) - c} kişi daha"
-                    return text
-                
-                report_embed.add_field(name=f"✅ Katılanlar ({len(attendees)})", value=fmt_list(attendees), inline=True)
-                report_embed.add_field(name=f"❌ Katılmayanlar ({len(declined)})", value=fmt_list(declined), inline=True)
-                report_embed.add_field(name=f"❔ Belki ({len(tentative)})", value=fmt_list(tentative), inline=True)
-                report_embed.add_field(name=f"⚠️ Eksikler ({len(missing)})", value=fmt_list(missing), inline=False)
-                report_embed.set_footer(text=f"Arşivlenme Tarihi: {datetime.datetime.fromisoformat(target_event.get('archived_at', datetime.datetime.now().isoformat())).strftime('%d.%m.%Y %H:%M')}")
-                
-            else:
-                attendees_list = target_event.get("attendees", [])
-                declined_list = target_event.get("declined", [])
-                tentative_list = target_event.get("tentative", [])
-                
-                if not attendees_list and not declined_list and not tentative_list:
-                    channel = ctx.guild.get_channel(target_event["channel_id"])
-                    if not channel: channel = await ctx.guild.fetch_channel(target_event["channel_id"])
-                    msg = await channel.fetch_message(target_event["message_id"])
-                    embed = msg.embeds[0]
-                    def parse_field(val): return [] if val == "-" else val.split("\n")
-                    attendees_list = parse_field(embed.fields[0].value)
-                    declined_list = parse_field(embed.fields[1].value)
-                    tentative_list = parse_field(embed.fields[2].value)
-
-                def fmt_list(l):
-                    if not l: return "-"
-                    text = "\n".join(l)
-                    if len(text) > 1000: return text[:1000] + f"\n...ve toplam {len(l)} kişi"
-                    return text
-                
-                report_embed.add_field(name=f"✅ Katılanlar ({len(attendees_list)})", value=fmt_list(attendees_list), inline=True)
-                report_embed.add_field(name=f"❌ Katılmayanlar ({len(declined_list)})", value=fmt_list(declined_list), inline=True)
-                report_embed.add_field(name=f"❔ Belki ({len(tentative_list)})", value=fmt_list(tentative_list), inline=True)
-                report_embed.set_footer(text="Bu etkinlik hala aktiftir.")
-
-            await ctx.send(embed=report_embed)
-            
-        except Exception as e:
-            await ctx.send(f"❌ Veri çekilirken hata oluştu: {e}")
-            print(f"Etkinlik info hata: {e}")
+    # !etkinlik command removed (deprecated)
 
     @commands.command(name='duyuru', aliases=['duyurub'])
     async def duyuru(self, ctx, channel: discord.TextChannel = None):
@@ -1125,124 +1183,60 @@ class Event(commands.Cog):
         if image_url: embed.set_thumbnail(url=image_url)
         await ctx.send(embed=embed, view=view)
 
-    @commands.command(name='tikyok')
-    async def tikyok(self, ctx, role: discord.Role = None):
-        if not ctx.message.reference:
-            await ctx.send("❌ Bu komutu kullanmak için bir etkinlik mesajına **cevap vermelisiniz** (reply).")
-            return
+    # !tikyok command removed (moved to EventView button)
 
-        ref_msg_id = ctx.message.reference.message_id
-        try: msg = await ctx.channel.fetch_message(ref_msg_id)
-        except:
-            await ctx.send("❌ Mesaj bulunamadı.")
-            return
-
-        if not msg.embeds:
-            await ctx.send("❌ Bu mesajda bir etkinlik embed'i yok.")
-            return
-
-        embed = msg.embeds[0]
-        all_reactors = []
-        def extract_mentions(field_val):
-            if field_val == "-": return []
-            return field_val.split("\n")
-
-        for i in range(3):
-            if len(embed.fields) > i:
-                users = extract_mentions(embed.fields[i].value)
-                all_reactors.extend(users)
-        
-        reacted_set = set(all_reactors)
-        target_members = set()
-        group_name = ""
-
-        if role:
-            target_members.update(role.members)
-            group_name = role.name
-        else:
-            group_name = "Klan Üyeleri (Varsayılan)"
-            found_roles = 0
-            for r_id in CLAN_MEMBER_ROLE_IDS:
-                r_obj = ctx.guild.get_role(r_id)
-                if r_obj:
-                    target_members.update(r_obj.members)
-                    found_roles += 1
-            if found_roles == 0:
-                await ctx.send("⚠️ Varsayılan roller sunucuda bulunamadı.")
-                return
-
-        missing_members = []
-        for member in target_members:
-            if member.bot: continue
-            if member.mention not in reacted_set:
-                missing_members.append(member)
-
-        if not missing_members:
-            await ctx.send(f"✅ **{group_name}** grubundaki herkes tepki vermiş!")
-        else:
-            missing_list = "\n".join([m.mention for m in missing_members])
-            result_embed = discord.Embed(
-                title=f"⚠️ {group_name} - Tepki Vermeyenler ({len(missing_members)})",
-                description=missing_list if len(missing_list) < 4000 else "Liste çok uzun...",
-                color=discord.Color.orange()
-            )
-            await ctx.send(embed=result_embed)
-
-    @tasks.loop(seconds=60)
+    @tasks.loop(hours=1)
     async def check_events_task(self):
-        tr_tz = TR_TIMEZONE
-        now = datetime.datetime.now(tr_tz)
+        """Saatlik kontrol: Geçmiş etkinlikleri arşivle. Deprecated in favor of check_reminders."""
         data_changed = False
+        now = datetime.datetime.now(TR_TIMEZONE)
         
         for server_id, events in list(self.events.items()):
             for event in list(events):
                 try:
-                    event_time = datetime.datetime.fromisoformat(event["timestamp"])
-                    time_diff = (event_time - now).total_seconds()
-                    reminder_sent = event.get("reminder_sent", False)
+                    # Check if event has started and archive it
+                    event_time = datetime.datetime.fromisoformat(event["timestamp"]).replace(tzinfo=TR_TIMEZONE)
                     
-                    if 0 < time_diff <= 900 and not reminder_sent:
+                    if now >= event_time:
                         try:
-                            channel = self.bot.get_channel(event["channel_id"])
-                            if channel:
-                                msg = await channel.fetch_message(event["message_id"])
-                                embed = msg.embeds[0]
-                                attendees_field = embed.fields[0].value
-                                notification_msg = f"⏳ **{event['title']}** etkinliğine 15 dakika kaldı!"
-                                if attendees_field != "-": notification_msg += f"\n{attendees_field}"
-                                await channel.send(notification_msg)
-                                event["reminder_sent"] = True
-                                data_changed = True
-                        except Exception: pass
-
-                    elif now >= event_time:
-                        try:
+                            guild_id = int(server_id)
                             channel = self.bot.get_channel(event["channel_id"])
                             if channel:
                                 await self.archive_event(event, channel.guild)
-                                msg = await channel.fetch_message(event["message_id"])
-                                embed = msg.embeds[0]
-                                attendees_field = embed.fields[0].value
-                                if attendees_field != "-": await channel.send(f"⏰ **{event['title']}** etkinliği başlıyor!\n{attendees_field}")
-                                else: await channel.send(f"⏰ **{event['title']}** etkinliği başlıyor! (Katılan kimse görünmüyor)")
-                                events.remove(event)
-                                data_changed = True
-                                log_channel = discord.utils.get(channel.guild.text_channels, name="etkinlik-log")
-                                if log_channel: await log_channel.send(f"🏁 **Etkinlik Başladı ve Arşivlendi:** {event['title']}")
+                                
+                                # Deactivate in database
+                                event_db_id = event.get("db_id")
+                                if event_db_id:
+                                    await self.db.deactivate_event(event_db_id)
+                                    logger.info(f"Event #{event.get('event_id')} started and archived")
+                                    data_changed = True
+                                
+                                # Optional: Send notification
+                                try:
+                                    msg = await channel.fetch_message(event["message_id"])
+                                    embed = msg.embeds[0]
+                                    attendees_field = embed.fields[0].value if embed.fields else "-"
+                                    if attendees_field != "-":
+                                        await channel.send(f"⏰ **{event['title']}** etkinliği başlıyor!\n{attendees_field}")
+                                    else:
+                                        await channel.send(f"⏰ **{event['title']}** etkinliği başlıyor! (Katılan kimse görünmüyor)")
+                                    
+                                    log_channel = discord.utils.get(channel.guild.text_channels, name="etkinlik-log")
+                                    if log_channel:
+                                        await log_channel.send(f"🏁 **Etkinlik Başladı ve Arşivlendi:** {event['title']}")
+                                except discord.NotFound:
+                                    logger.warning(f"Event message not found for event #{event.get('event_id')}")
+                                except Exception as e:
+                                    logger.error(f"Error notifying event start: {e}")
                         except Exception as e:
-                            # print(f"Event Loop Error (Check/Archive): {e}")
-                            # Sadece mesaj bulunamadıysa sil, diğer hatalarda silme
-                            if isinstance(e, discord.NotFound):
-                                events.remove(event)
-                                data_changed = True
-                            else:
-                                print(f"⚠️ Event Error: {e} (Etkinlik silinmedi)")
+                            logger.error(f"Event archive error: {e}")
                             
                 except Exception as e:
-                     print(f"⚠️ Event Processing Error: {e}")
-                     # events.remove(event) # KALDIRILDI: Hatalı veri varsa döngüden çıkması için logla geç, veri kaybetme
+                    logger.error(f"Event processing error: {e}")
 
-        if data_changed: self.save_events()
+        if data_changed:
+            # Reload events from database to sync memory
+            self.events = await self.load_events_from_db()
 
     @check_events_task.before_loop
     async def before_check_events(self):

@@ -9,7 +9,7 @@ import asyncio
 import traceback
 import logging
 from .utils.config import ADMIN_USER_IDS, ADMIN_ROLE_IDS, CLAN_MEMBER_ROLE_IDS, COLORS, BM_API_URL, SERVER_ID, BM_API_KEY, GOOGLE_SHEET_KEY, DEV_MODE
-from .utils.chart_maker import generate_activity_image, generate_profile_card
+from .utils.chart_maker import generate_activity_image, generate_profile_card, HAS_MATPLOTLIB
 from .utils.pagination import PaginationView
 from .utils.cache import TTLCache
 
@@ -71,102 +71,53 @@ class PlayerAddModal(discord.ui.Modal, title="Oyuncu Ekle / Güncelle"):
             await interaction.response.send_message("❌ Steam ID sadece rakamlardan oluşmalıdır.", ephemeral=True)
             return
 
-        db_file = "squad_db.json"
-        data = {"players": []}
-        if os.path.exists(db_file):
-            try:
-                def _read():
-                    with open(db_file, "r", encoding="utf-8") as f: return json.load(f)
-                data = await asyncio.to_thread(_read)
-            except: pass
+        cog = self.bot.get_cog("SquadPlayers")
+        if not cog:
+            await interaction.response.send_message("❌ Sistem hatası: Cog bulunamadı.", ephemeral=True)
+            return
 
-        found = False
-        # Discord ID can be numeric ID or username string
+        # Discord ID logic
         parsed_d_id = None
+        db_discord_id = None
+        
         if d_id:
             if d_id.isdigit():
-                parsed_d_id = int(d_id)  # Numeric Discord ID
+                parsed_d_id = int(d_id)
+                db_discord_id = parsed_d_id
             else:
-                parsed_d_id = d_id  # Discord username (string)
+                parsed_d_id = d_id # Username string, display only
 
-        for p in data.get("players", []):
-            if p["steam_id"] == s_id:
-                p["name"] = p_name
-                if parsed_d_id: p["discord_id"] = parsed_d_id
-                found = True
-                break
-        
-        if not found:
-            new_p = {
-                "steam_id": s_id,
-                "name": p_name,
-                "discord_id": parsed_d_id,
-                "stats": {}, 
-                "season_stats": {}
-            }
-            if "players" not in data: data["players"] = []
-            data["players"].append(new_p)
-
-        log_msg = f"[{datetime.datetime.now()}] Manual Player Update: {p_name} ({s_id}) by {interaction.user}"
         try:
-            with open("squad_debug.log", "a", encoding="utf-8") as f: f.write(log_msg + "\n")
-        except: pass
-
-        # HYBRID MODE: Check database FIRST to determine correct action
-        cog = self.bot.get_cog("SquadPlayers")
-        player_exists_in_db = False
-        
-        if cog and hasattr(cog, 'json_mode') and hasattr(cog, 'db') and not cog.json_mode:
-            try:
-                existing_player = await cog.db.get_player_by_steam_id(s_id)
-                player_exists_in_db = bool(existing_player)
-            except:
-                pass
-        
-        # Determine action based on database check (SQLite) or JSON (fallback)
-        if cog and hasattr(cog, 'json_mode') and not cog.json_mode:
-            action = "GÜNCELLENDİ" if player_exists_in_db else "EKLENDİ"
-        else:
-            action = "GÜNCELLENDİ" if found else "EKLENDİ"
-        
-        # CRITICAL: Respond to interaction FIRST (before slow sync)
-        await interaction.response.send_message(f"✅ Oyuncu başarıyla **{action}**!\nİsim: {p_name}\nSteamID: {s_id}", ephemeral=True)
-        
-        # HYBRID MODE: Save to database
-        if cog and hasattr(cog, 'json_mode') and hasattr(cog, 'db') and not cog.json_mode:
-            # SQLite mode - save to database instead of JSON
-            try:
-                if player_exists_in_db:
-                    await cog.db.update_player(s_id, name=p_name, discord_id=parsed_d_id)
-                else:
-                    await cog.db.add_player(s_id, p_name, parsed_d_id)
-                
-                # Log to channel
-                await cog.log_to_channel(interaction.guild, "✏️ Oyuncu (DB)", 
-                    f"**Oyuncu:** {p_name}\n**SteamID:** `{s_id}`\n**Discord:** {parsed_d_id or '-'}", 
-                    interaction.user)
-                return  # Exit - database handled it
-            except Exception as e:
-                import logging
-                logging.getLogger("SquadPlayers").error(f"DB save error: {e}, fallback to JSON")
-        
-                # Now do slow operations in background
-        cog = self.bot.get_cog("SquadPlayers")
-        if cog:
-            # Save to DB and auto-sync to Sheets (async background task)
-            asyncio.create_task(cog._save_db_and_sync(data))
+            # Check existing
+            existing_player = await cog.db.get_player_by_steam_id(s_id)
+            action = "GÜNCELLENDİ" if existing_player else "EKLENDİ"
             
-            # Log to Channel
-            await cog.log_to_channel(interaction.guild, "✏️ Oyuncu Düzenlendi/Eklendi", 
-                f"**Oyuncu:** {p_name}\n**SteamID:** `{s_id}`\n**Discord:** {parsed_d_id or '-'}", 
+            # DB Write
+            if existing_player:
+                await cog.db.update_player(s_id, name=p_name, discord_id=db_discord_id)
+            else:
+                new_id = await cog.db.add_player(s_id, p_name, db_discord_id)
+                # Init stats
+                await cog.db.add_or_update_stats(new_id, {}, {})
+
+            # Log to file (Legacy support if needed)
+            log_msg = f"[{datetime.datetime.now()}] Manual Player Update (DB): {p_name} ({s_id}) by {interaction.user}"
+            try:
+                with open("squad_debug.log", "a", encoding="utf-8") as f: f.write(log_msg + "\n")
+            except: pass
+
+            # Embed Log
+            discord_display = parsed_d_id if parsed_d_id else "-"
+            await cog.log_to_channel(interaction.guild, "✏️ Oyuncu (DB)", 
+                f"**Oyuncu:** {p_name}\n**SteamID:** `{s_id}`\n**Discord:** {discord_display}", 
                 interaction.user)
-        else:
-            # Fallback if cog not found (shouldn't happen)
-            data["last_update"] = str(datetime.datetime.now())
-            def _save():
-                with open(db_file, "w", encoding="utf-8") as f:
-                    json.dump(data, f, ensure_ascii=False, indent=4)
-            await asyncio.to_thread(_save)
+
+            # Response
+            await interaction.response.send_message(f"✅ Oyuncu başarıyla **{action}**!\nİsim: {p_name}\nSteamID: {s_id}", ephemeral=True)
+
+        except Exception as e:
+            logger.error(f"Error in PlayerAddModal: {e}", exc_info=True)
+            await interaction.response.send_message(f"❌ İşlem sırasında bir hata oluştu: {e}", ephemeral=True)
 
 class PlayerSearchModal(discord.ui.Modal, title="Oyuncu Ara"):
     def __init__(self, bot):
@@ -183,33 +134,30 @@ class PlayerSearchModal(discord.ui.Modal, title="Oyuncu Ara"):
     async def on_submit(self, interaction: discord.Interaction):
         query = self.name_query.value.lower()
         
-        # HYBRID MODE: Search in database or JSON
         cog = self.bot.get_cog("SquadPlayers")
-        matches = []
-        
-        if cog and hasattr(cog, 'json_mode') and hasattr(cog, 'db') and not cog.json_mode:
-            # SQLite mode
-            try:
-                all_players = await cog.db.get_all_players()
-                matches = [{
-                    "steam_id": p.steam_id,
-                    "name": p.name,
-                    "discord_id": p.discord_id
-                } for p in all_players if query in p.name.lower()]
-            except Exception as e:
-                import logging
-                logging.getLogger("SquadPlayers").error(f"DB search error: {e}")
-        
-        # JSON fallback
-        if not matches and os.path.exists("squad_db.json"):
-            try:
-                def _read_search():
-                    with open("squad_db.json", "r", encoding="utf-8") as f:
-                        data = json.load(f)
-                        return [p for p in data.get("players", []) if query in p["name"].lower()]
-                matches = await asyncio.to_thread(_read_search)
-            except: pass
-        
+        if not cog:
+             await interaction.response.send_message("❌ Sistem hatası: Cog bulunamadı.", ephemeral=True)
+             return
+
+        try:
+            # Search in Database
+            # We assume query length check is handled by TextInput min_length=2
+            
+            # Using new search_players method
+            found_players = await cog.db.search_players(query)
+            
+            # Convert to dict for view compatibility
+            matches = [{
+                "steam_id": p.steam_id,
+                "name": p.name,
+                "discord_id": p.discord_id
+            } for p in found_players]
+
+        except Exception as e:
+            logger.error(f"Search error: {e}", exc_info=True)
+            await interaction.response.send_message(f"❌ Arama sırasında hata oluştu: {e}", ephemeral=True)
+            return
+
         if not matches:
             await interaction.response.send_message("❌ Eşleşen oyuncu bulunamadı.", ephemeral=True)
             return
@@ -247,17 +195,7 @@ class PlayerSelectDropdown(discord.ui.Select):
                 target_player = p
                 break
         
-        # JSON fallback if not found
-        if not target_player and os.path.exists("squad_db.json"):
-            try:
-                def _find_player():
-                    with open("squad_db.json", "r", encoding="utf-8") as f:
-                        data = json.load(f)
-                        for p in data.get("players", []):
-                            if p["steam_id"] == steam_id: return p
-                    return None
-                target_player = await asyncio.to_thread(_find_player)
-            except: pass
+
             
         if not target_player:
             await interaction.response.send_message("❌ Oyuncu veritabanında bulunamadı (silinmiş olabilir).", ephemeral=True)
@@ -286,71 +224,39 @@ class PlayerActionView(discord.ui.View):
         await interaction.response.send_modal(modal)
 
     @discord.ui.button(label="🗑️ Sil", style=discord.ButtonStyle.danger, emoji="🗑️")
+    @discord.ui.button(label="🗑️ Sil", style=discord.ButtonStyle.danger, emoji="🗑️")
     async def delete_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
         s_id = self.player_data['steam_id']
         name = self.player_data['name']
-        db_file = "squad_db.json"
         
-        deleted = False
+        # Confirmation Dialog can be added here but for now direct delete
         
-        # HYBRID MODE: Try SQLite first
         cog = self.bot.get_cog("SquadPlayers")
-        if cog and hasattr(cog, 'json_mode') and hasattr(cog, 'db') and not cog.json_mode:
-            try:
-                # Delete from database
-                deleted = await cog.db.delete_player(s_id)
-                if deleted:
-                    
-                    # Log to channel
-                    await cog.log_to_channel(interaction.guild, "🗑️ Oyuncu Silindi (DB)", 
-                        f"**Oyuncu:** {name}\n**SteamID:** `{s_id}`", 
-                        interaction.user, color=COLORS.ERROR)
-                    
-                    await interaction.response.send_message(f"✅ **{name}** ({s_id}) başarıyla silindi (DB).", ephemeral=True)
-                    return  # Exit - database handled it
-            except Exception as e:
-                import logging
-                logging.getLogger("SquadPlayers").error(f"DB delete error: {e}, fallback to JSON")
-        
-        # JSON mode or fallback
-        if os.path.exists(db_file):
-            try:
-                def _delete_logic():
-                    with open(db_file, "r", encoding="utf-8") as f: data = json.load(f)
-                    initial_len = len(data.get("players", []))
-                    data["players"] = [p for p in data["players"] if p["steam_id"] != s_id]
-                    if len(data["players"]) < initial_len:
-                        data["last_update"] = str(datetime.datetime.now())
-                        with open(db_file, "w", encoding="utf-8") as f:
-                            json.dump(data, f, ensure_ascii=False, indent=4)
-                        return True
-                    return False
-                
-                deleted = await asyncio.to_thread(_delete_logic)
-            except Exception as e:
-                await interaction.response.send_message(f"❌ Hata: {e}", ephemeral=True)
-                return
+        if not cog:
+             await interaction.response.send_message("❌ Sistem hatası: Cog bulunamadı.", ephemeral=True)
+             return
 
-        if deleted:
-            try:
-                with open("squad_debug.log", "a", encoding="utf-8") as f: 
-                    f.write(f"[{datetime.datetime.now()}] Manual Player DELETE: {name} ({s_id}) by {interaction.user}\n")
-            except: pass
-            
-            # Log to Channel
-            cog = self.bot.get_cog("SquadPlayers")
-            if cog:
-                await cog.log_to_channel(interaction.guild, "🗑️ Oyuncu Silindi", 
-                    f"**Oyuncu:** {name}\n**SteamID:** `{s_id}`", 
-                    interaction.user, color=COLORS.ERROR)
-            
-            await interaction.response.send_message(f"✅ **{name}** ({s_id}) başarıyla silindi.", ephemeral=True)
-            
-            # Sync to Sheet
-            if cog:
-                 asyncio.create_task(cog.update_sheet_player(s_id, name, None, delete=True))
-        else:
-            await interaction.response.send_message("❌ Silme işlemi başarısız (Zaten silinmiş olabilir).", ephemeral=True)
+        try:
+             # Delete from database
+             deleted = await cog.db.delete_player(s_id)
+             
+             if deleted:
+                 # Log to channel
+                 await cog.log_to_channel(interaction.guild, "🗑️ Oyuncu Silindi (DB)", 
+                     f"**Oyuncu:** {name}\n**SteamID:** `{s_id}`", 
+                     interaction.user, color=COLORS.ERROR)
+                 
+                 await interaction.response.send_message(f"✅ **{name}** ({s_id}) başarıyla veritabanından silindi.", ephemeral=True)
+                 
+                 # Sync to Sheet (Optional async task)
+                 if hasattr(cog, 'update_sheet_player'):
+                     asyncio.create_task(cog.update_sheet_player(s_id, name, None, delete=True))
+             else:
+                 await interaction.response.send_message(f"❌ Silme başarısız: Oyuncu veritabanında bulunamadı.", ephemeral=True)
+
+        except Exception as e:
+            logger.error(f"DB delete error: {e}", exc_info=True)
+            await interaction.response.send_message(f"❌ Silme işlemi sırasında hata: {e}", ephemeral=True)
 
 
 class PlayerManageView(discord.ui.View):
@@ -658,6 +564,45 @@ class SquadPlayers(commands.Cog):
         # Loops auto-start via @tasks.loop decorator
 
 
+    def _player_to_dict(self, p) -> dict:
+        """Convert SQLAlchemy Player object to legacy dictionary format"""
+        stats = {}
+        season_stats = {}
+        
+        if p.stats:
+             if p.stats.all_time_json:
+                 try: stats = json.loads(p.stats.all_time_json)
+                 except: pass
+             else:
+                 # Construct from columns if JSON missing
+                 stats = {
+                     "totalScore": p.stats.total_score,
+                     "totalKills": p.stats.total_kills,
+                     "totalDeaths": p.stats.total_deaths,
+                     "totalRevives": p.stats.total_revives,
+                     "totalKdRatio": p.stats.total_kd_ratio
+                 }
+        
+             if p.stats.season_json:
+                 try: season_stats = json.loads(p.stats.season_json)
+                 except: pass
+             else:
+                  season_stats = {
+                     "seasonScore": p.stats.season_score,
+                     "seasonKills": p.stats.season_kills,
+                     "seasonDeaths": p.stats.season_deaths,
+                     "seasonRevives": p.stats.season_revives,
+                     "seasonKdRatio": p.stats.season_kd_ratio
+                  }
+             
+        return {
+            "steam_id": p.steam_id,
+            "name": p.name,
+            "discord_id": p.discord_id,
+            "stats": stats,
+            "season_stats": season_stats
+        }
+
     @tasks.loop(hours=1)
     async def automated_report_loop(self):
         """Checks periodically if a scheduled report (Weekly/Monthly) is due."""
@@ -823,15 +768,10 @@ class SquadPlayers(commands.Cog):
         creds = Credentials.from_service_account_file("service_account.json", scopes=scope)
         return gspread.authorize(creds)
     
-    async def _export_to_sheets_full(self, db_data, sheet_name="Whitelist"):
+    async def _export_to_sheets_full(self, sheet_name="Whitelist"):
         """
-        Internal function to export ENTIRE squad_db.json data to Google Sheets.
-        This replaces the sheet contents with current DB data.
-        Called automatically after DB modifications for full sync.
-        
-        Args:
-            db_data: The squad_db.json dictionary
-            sheet_name: Target sheet name (default: "Whitelist")
+        Internal function to export ENTIRE database data to Google Sheets.
+        Fetches fresh data from database.
         """
         try:
             if gspread is None:
@@ -844,9 +784,21 @@ class SquadPlayers(commands.Cog):
             if not SHEET_KEY:
                 logger.warning("⚠️ GOOGLE_SHEET_KEY not configured, skipping Sheets sync")
                 return False
+
+            # Fetch fresh data from DB first
+            players = await self.db.get_all_players()
             
+            # Prepare data row list in main thread
+            headers = ["Steam64ID", "Player", "Discord ID"]
+            rows = [headers]
+            for player in players:
+                steam_id = player.steam_id
+                name = player.name
+                discord_id = str(player.discord_id) if player.discord_id else ""
+                rows.append([steam_id, name, discord_id])
+
             # Get client and perform export (sync operations, run in thread)
-            def _sync_export():
+            def _sync_export(data_rows):
                 client = self._get_sheets_client_sync()
                 spreadsheet = client.open_by_key(SHEET_KEY)
                 
@@ -856,25 +808,14 @@ class SquadPlayers(commands.Cog):
                 except gspread.exceptions.WorksheetNotFound:
                     worksheet = spreadsheet.add_worksheet(title=sheet_name, rows=1000, cols=10)
                 
-                # Prepare data
-                headers = ["Steam64ID", "Player", "Discord ID"]
-                rows = [headers]
-                
-                for player in db_data.get("players", []):
-                    steam_id = player.get("steam_id", "")
-                    name = player.get("name", "")
-                    discord_id = str(player.get("discord_id", "")) if player.get("discord_id") else ""
-                    
-                    rows.append([steam_id, name, discord_id])
-                
                 # Clear and update sheet (batch operation for speed)
                 worksheet.clear()
-                worksheet.update(rows, value_input_option='RAW')
+                worksheet.update(data_rows, value_input_option='RAW')
                 
-                return len(rows) - 1  # Exclude header
+                return len(data_rows) - 1  # Exclude header
             
             # Run in thread to avoid blocking
-            exported_count = await asyncio.to_thread(_sync_export)
+            exported_count = await asyncio.to_thread(_sync_export, rows)
             logger.info(f"✅ Sheets auto-sync: {exported_count} oyuncu → '{sheet_name}'")
             return True
             
@@ -882,34 +823,19 @@ class SquadPlayers(commands.Cog):
             logger.warning("⚠️ service_account.json not found, skipping Sheets sync")
             return False
         except Exception as e:
-            logger.error(f"❌ Sheets sync hatası: {e}")
-            logger.debug(traceback.format_exc())
+            logger.error(f"❌ Sheets sync hatası: {e}", exc_info=True)
             return False
     
-    async def _save_db_and_sync(self, data):
+    async def _save_db_and_sync(self, data=None):
         """
-        Save to squad_db.json AND automatically sync to Google Sheets.
-        This is the PRIMARY function to use when modifying the database.
-        
-        Args:
-            data: Complete database dictionary to save
+        Trigger full sync to Google Sheets from Database.
+        Arg 'data' is ignored, kept for compatibility.
         """
-        # Update timestamp
-        data["last_update"] = str(datetime.datetime.now())
-        
-        # 1. Save to JSON (critical - must succeed)
-        def _write_json():
-            with open("squad_db.json", "w", encoding="utf-8") as f:
-                json.dump(data, f, ensure_ascii=False, indent=2)
-        
-        await asyncio.to_thread(_write_json)
-        logger.debug("💾 DB saved to squad_db.json")
-        
-        # 2. Auto-sync to Sheets (non-critical - failure won't break functionality)
+        # DB save is handled by adapter calls instantly.
         try:
-            await self._export_to_sheets_full(data)
+            await self._export_to_sheets_full()
         except Exception as e:
-            logger.warning(f"⚠️ Auto-sync to Sheets failed (DB still saved): {e}")
+            logger.warning(f"⚠️ Auto-sync to Sheets failed: {e}")
     
     # ==================== END AUTO-SYNC HELPERS ====================
 
@@ -1072,23 +998,26 @@ class SquadPlayers(commands.Cog):
         found_players = {} # SteamID -> Info
         
         # --- DEV MODE: Local DB as Source ---
+        # --- DEV MODE: Local DB as Source ---
         if DEV_MODE:
-            if os.path.exists("squad_db.json"):
-                try:
-                    def _load_local_db():
-                        with open("squad_db.json", "r", encoding="utf-8") as f:
-                            return json.load(f)
-                    local_data = await asyncio.to_thread(_load_local_db)
-                    for p in local_data.get("players", []):
-                        found_players[p["steam_id"]] = p
-                    
-                    if status_callback: await status_callback("scanned", len(found_players))
-                except Exception as e:
-                    logger.error(f"Dev Mode Load Error: {e}")
-                    if status_callback: await status_callback("error", f"Dev Mode DB Error: {e}")
-                    return
-            else:
-                if status_callback: await status_callback("error", "Dev Mode: squad_db.json bulunamadı.")
+            try:
+                # Use database query
+                all_players = await self.db.get_all_players()
+                
+                # Convert to dict format expected by the rest of the method
+                for p in all_players:
+                    p_dict = {
+                        "steam_id": p.steam_id,
+                        "name": p.name,
+                        "discord_id": p.discord_id,
+                        # Add stats if needed, but sync usually only needs identity
+                    }
+                    found_players[p.steam_id] = p_dict
+                
+                if status_callback: await status_callback("scanned", len(found_players))
+            except Exception as e:
+                logger.error(f"Dev Mode DB Load Error: {e}")
+                if status_callback: await status_callback("error", f"Dev Mode DB Error: {e}")
                 return
 
         # --- PROD MODE: Google Sheet Sync ---
@@ -1351,7 +1280,8 @@ class SquadPlayers(commands.Cog):
             
             # Get currently online players from BM server API
             url = f"{BM_API_URL}/servers/{SERVER_ID}"
-            params = {"include": "player"}
+            # CHANGE: Request identifiers too
+            params = {"include": "player,identifier"}
             
             async with self.session.get(url, params=params) as resp:
                 if resp.status != 200:
@@ -1361,6 +1291,17 @@ class SquadPlayers(commands.Cog):
                 data = await resp.json()
                 included = data.get("included", [])
                 
+                # Build Player ID -> Steam ID Map first (Robust method)
+                player_steam_map = {}
+                for item in included:
+                    if item.get("type") == "identifier":
+                        attrs = item.get("attributes", {})
+                        if attrs.get("type") == "steamID":
+                            # Check relationships
+                            pid = item.get("relationships", {}).get("player", {}).get("data", {}).get("id")
+                            if pid:
+                                player_steam_map[pid] = attrs.get("identifier")
+
                 tracked_count = 0
                 
                 if self.json_mode:
@@ -1371,13 +1312,17 @@ class SquadPlayers(commands.Cog):
                         if item.get("type") == "player":
                             attrs = item.get("attributes", {})
                             player_name = attrs.get("name", "Unknown")
+                            p_id = item.get("id")
                             
-                            # Get SteamID from identifiers
-                            steam_id = None
-                            for ident in attrs.get("identifiers", []):
-                                if ident.get("type") == "steamID":
-                                    steam_id = ident.get("identifier")
-                                    break
+                            # Get SteamID from map
+                            steam_id = player_steam_map.get(p_id)
+                            
+                            # Fallback: Check internal attributes (rare but possible)
+                            if not steam_id:
+                                for ident in attrs.get("identifiers", []):
+                                    if ident.get("type") == "steamID":
+                                        steam_id = ident.get("identifier")
+                                        break
                             
                             if steam_id:
                                 activity_data = await self.record_activity(steam_id, player_name, activity_data)
@@ -1385,7 +1330,7 @@ class SquadPlayers(commands.Cog):
                     
                     if tracked_count > 0:
                         await self.save_activity_data(activity_data)
-                        logger.info(f"Activity tracker (JSON): Recorded {tracked_count} players")
+                        logger.info(f"Activity tracker (JSON): Recorded {tracked_count} players (Map size: {len(player_steam_map)})")
                 
                 else:
                     # New SQLite mode
@@ -1397,13 +1342,17 @@ class SquadPlayers(commands.Cog):
                         if item.get("type") == "player":
                             attrs = item.get("attributes", {})
                             player_name = attrs.get("name", "Unknown")
+                            p_id = item.get("id")
                             
                             # Get SteamID
-                            steam_id = None
-                            for ident in attrs.get("identifiers", []):
-                                if ident.get("type") == "steamID":
-                                    steam_id = ident.get("identifier")
-                                    break
+                            steam_id = player_steam_map.get(p_id)
+                            
+                            # Fallback
+                            if not steam_id:
+                                for ident in attrs.get("identifiers", []):
+                                    if ident.get("type") == "steamID":
+                                        steam_id = ident.get("identifier")
+                                        break
                             
                             if steam_id:
                                 # Get or create player
@@ -1430,7 +1379,8 @@ class SquadPlayers(commands.Cog):
                     if tracked_count > 0:
                         logger.info(f"Activity tracker (SQLite): Recorded {tracked_count} players")
                     else:
-                        logger.debug("Activity tracker: No players online")
+                        # Log why 0 (empty server or map fail?)
+                        logger.debug(f"Activity tracker: No players recorded. Players online: {len([i for i in included if i.get('type')=='player'])}")
                 
         except Exception as e:
             logger.error(f"Activity tracker loop error: {e}", exc_info=True)
@@ -1519,36 +1469,40 @@ class SquadPlayers(commands.Cog):
 
     @commands.command(name='squad_top')
     async def squad_top(self, ctx):
-        if not await self.check_permissions(ctx): return
-        if not os.path.exists("squad_db.json"):
-            await ctx.send("⚠️ Veritabanı yok. !1squad_sync çalıştırın.")
-            return
-
-        def _read_db():
-            with open("squad_db.json", "r", encoding="utf-8") as f: return json.load(f)
+        # if not await self.check_permissions(ctx): return
         
         async def refresh_data():
             """Refresh callback for squad_top"""
-            data = await asyncio.to_thread(_read_db)
-            return sorted(data.get("players", []), key=lambda x: x["stats"].get("totalScore", 0), reverse=True)
+            db_players = await self.db.get_all_players()
+            players = [self._player_to_dict(p) for p in db_players]
+            return sorted(players, key=lambda x: x["stats"].get("totalScore", 0), reverse=True)
         
-        data = await asyncio.to_thread(_read_db)
-        sorted_players = sorted(data.get("players", []), key=lambda x: x["stats"].get("totalScore", 0), reverse=True)
+        # Initial Load
+        db_players = await self.db.get_all_players()
+        players = [self._player_to_dict(p) for p in db_players]
+        
+        if not players:
+             await ctx.send("⚠️ Veritabanında oyuncu bulunamadı.")
+             return
+
+        sorted_players = sorted(players, key=lambda x: x["stats"].get("totalScore", 0), reverse=True)
         view = SquadLeaderboardView(sorted_players, mode="AllTime", refresh_callback=refresh_data)
         await ctx.send(embed=view.get_current_embed(), view=view)
 
     @commands.command(name='squad_season')
     async def squad_season(self, ctx):
-        if not await self.check_permissions(ctx): return
+        # if not await self.check_permissions(ctx): return
         
-        # HYBRID: Use helper to get players from database or JSON
         async def refresh_data():
             """Refresh callback for squad_season"""
-            players = await self._get_all_players_hybrid()
+            # Use DB directly
+            db_players = await self.db.get_all_players()
+            players = [self._player_to_dict(p) for p in db_players]
             season_players = [p for p in players if p.get("season_stats")]
             return sorted(season_players, key=lambda x: x["season_stats"].get("totalScore", 0), reverse=True) if season_players else []
         
-        players = await self._get_all_players_hybrid()
+        db_players = await self.db.get_all_players()
+        players = [self._player_to_dict(p) for p in db_players]
         season_players = [p for p in players if p.get("season_stats")]
         
         if not season_players:
@@ -1563,20 +1517,13 @@ class SquadPlayers(commands.Cog):
     async def compare(self, ctx, p1: Union[discord.Member, str], p2: Union[discord.Member, str]):
         """İki oyuncunun istatistiklerini karşılaştırır."""
         
-        if not os.path.exists("squad_db.json"):
-            await ctx.send("⚠️ Veritabanı bulunamadı. !1squad_sync çalıştırın.")
-            return
-
-        def _read_db():
-            with open("squad_db.json", "r", encoding="utf-8") as f: return json.load(f)
-        
         try:
-            data = await asyncio.to_thread(_read_db)
-        except:
+            db_players = await self.db.get_all_players()
+            players = [self._player_to_dict(p) for p in db_players]
+        except Exception as e:
+             logger.error(f"Compare DB error: {e}")
              await ctx.send("⚠️ Veritabanı okunamadı.")
              return
-
-        players = data.get("players", [])
 
         def resolve_player(query):
             # 1. Discord Member Check
@@ -1955,32 +1902,26 @@ class SquadPlayers(commands.Cog):
     async def resolve_ids(self, ctx):
         if not await self.check_permissions(ctx): return
         
-        msg = await ctx.send("🔄 Veritabanı taranıyor ve Discord üyeleri ile eşleştiriliyor...")
+        msg = await ctx.send("🔄 Veritabanı taranıyor ve eksik Discord bağlantıları aranıyor...")
         
-        if not os.path.exists("squad_db.json"):
-            await msg.edit(content="⚠️ Veritabanı bulunamadı.")
+        if not self.db:
+            await msg.edit(content="⚠️ Veritabanı bağlantısı yok.")
             return
 
-        def _read_db():
-            with open("squad_db.json", "r", encoding="utf-8") as f: return json.load(f)
-        
         try:
-            db_data = await asyncio.to_thread(_read_db)
+            # Get all players from DB
+            players = await self.db.get_all_players()
         except Exception as e:
             await msg.edit(content=f"❌ Veritabanı okuma hatası: {e}")
             return
 
-        players = db_data.get("players", [])
         logger.info(f"DEBUG: resolve_ids START. Total Players in DB: {len(players)}")
         resolved_count = 0
         total_scanned = 0
-        failed_count = 0
         
         resolved_list = []
 
         # Cache Member Data for speed
-        # Map: Lowercase Name -> Member Object
-        # We need multiple maps for diff properties
         member_map_name = {}
         member_map_global = {}
         member_map_display = {}
@@ -1990,12 +1931,11 @@ class SquadPlayers(commands.Cog):
             if m.global_name: member_map_global[m.global_name.lower()] = m
             if m.display_name: member_map_display[m.display_name.lower()] = m
 
-        for i, p in enumerate(players):
-            d_id = p.get("discord_id")
-            
-            if d_id and not isinstance(d_id, int) and not str(d_id).isdigit():
+        for p in players:
+            # We look for players WITHOUT a Discord ID
+            if not p.discord_id:
                 total_scanned += 1
-                target_str = str(d_id).strip().lower()
+                target_str = str(p.name).strip().lower()
                 
                 found_member = None
                 
@@ -2010,31 +1950,36 @@ class SquadPlayers(commands.Cog):
                     found_member = member_map_display[target_str]
 
                 if found_member:
-                    p["discord_id"] = found_member.id
-                    p["_resolved_from"] = d_id # Backup old string just in case
+                    # Update DB
+                    await self.db.update_player(p.steam_id, discord_id=found_member.id)
                     resolved_count += 1
-                    resolved_list.append(f"{d_id} -> {found_member.display_name} ({found_member.id})")
-                else:
-                    failed_count += 1
+                    resolved_list.append(f"{p.name} -> {found_member.display_name} ({found_member.id})")
         
         if resolved_count > 0:
-            db_data["last_update"] = str(datetime.datetime.now())
-            def _save_db():
-                with open("squad_db.json", "w", encoding="utf-8") as f:
-                    json.dump(db_data, f, ensure_ascii=False, indent=4)
-            await asyncio.to_thread(_save_db)
+            embed = discord.Embed(
+                title="✅ Eşleştirme Tamamlandı",
+                description=f"Toplam **{resolved_count}** oyuncu Discord ile eşleştirildi.",
+                color=discord.Color.green()
+            )
+            # Preview first 10
+            preview = "\n".join(resolved_list[:10])
+            if len(resolved_list) > 10:
+                preview += f"\n... ve {len(resolved_list)-10} kişi daha."
+            
+            embed.add_field(name="Örnek Eşleşmeler", value=preview[:1000])
+            await msg.edit(content=None, embed=embed)
             
             # Log results
-            log_desc = f"**Çözümlenen:** {resolved_count}\n**Başarısız:** {failed_count}\n**Toplam Taranan:** {total_scanned}"
+            log_desc = f"**Çözümlenen:** {resolved_count}\n**Toplam Taranan:** {total_scanned}"
             if resolved_list:
                 sample = "\n".join(resolved_list[:10])
                 if len(resolved_list) > 10: sample += f"\n...ve {len(resolved_list)-10} daha."
                 log_desc += f"\n\n**Örnekler:**\n{sample}"
             
             await self.log_to_channel(ctx.guild, "🔧 Discord ID Çözümleme", log_desc, ctx.author)
-            await msg.edit(content=f"✅ Tamamlandı!\n{resolved_count} ID çözümlendi, {failed_count} başarısız.")
+            
         else:
-            await msg.edit(content=f"ℹ️ Çözümlenecek yeni ID bulunamadı. (Taranan: {total_scanned})")
+            await msg.edit(content=f"ℹ️ Yeni eşleştirme bulunamadı. (Taranan: {total_scanned})")
 
     @commands.command(name='rol_kontrol')
     async def rol_kontrol(self, ctx):
@@ -2187,25 +2132,38 @@ class SquadPlayers(commands.Cog):
                             player_obj = p
                             break
             else:
-                # String query - try SteamID first
+                # String query - try SteamID or Name using efficient DB search
                 q_str = str(target_query).strip()
+                
+                # 1. Try exact Steam ID first
                 player_obj = await self.db.get_player_by_steam_id(q_str)
                 
                 if not player_obj:
-                    # Try name search
-                    all_players = await self.db.get_all_players()
-                    q_lower = q_str.lower()
-                    # Exact match
-                    for p in all_players:
-                        if p.name.lower() == q_lower:
-                            player_obj = p
-                            break
-                    # Partial match
-                    if not player_obj:
-                        for p in all_players:
-                            if q_lower in p.name.lower():
-                                player_obj = p
-                                break
+                    # 2. Search by name (SQL LIKE)
+                    found_players = await self.db.search_players(q_str)
+                    if found_players:
+                        # Pick best match: Exact match > Starts with > Contains
+                        # (search_players returns list, we filter here)
+                        best_match = None
+                        q_lower = q_str.lower()
+                        
+                        for p in found_players:
+                             if p.name.lower() == q_lower:
+                                 best_match = p
+                                 break
+                        
+                        if not best_match:
+                             # Starts with
+                             for p in found_players:
+                                 if p.name.lower().startswith(q_lower):
+                                     best_match = p
+                                     break
+                        
+                        if not best_match:
+                             # First result
+                             best_match = found_players[0]
+                        
+                        player_obj = best_match
             
             # Convert DB object to dict (backward compatibility)
             if player_obj:
@@ -2828,31 +2786,31 @@ class SquadPlayers(commands.Cog):
              await ctx.send(f"🔄 {period.capitalize()} Raporu hazırlanıyor ve dönem kapatılıyor...")
              
              # Calculate deltas BEFORE snapshot (Phase 2)
-             deltas = self._calculate_deltas(period)
+             deltas = await self._calculate_deltas(period)
              if deltas:
                  self._save_to_history(period, deltas)
              
              await self._publish_report(ctx.guild, period) # Send to #rapor-log logic
-             self._take_snapshot(period)  # Take NEW snapshot AFTER saving history
+             await self._take_snapshot(period)  # Take NEW snapshot AFTER saving history
              await ctx.send(f"✅ {period.capitalize()} dönemi sıfırlandı. Yeni snapshot alındı. Rapor: #rapor-log")
              
         elif action == "view":
              # Just preview
-             deltas = self._calculate_deltas(period)
+             deltas = await self._calculate_deltas(period)
              if not deltas:
                  await ctx.send(f"⚠️ {period.capitalize()} için karşılaştırılacak veri bulunamadı (Snapshot yok veya veri değişmemiş).")
                  # Check if snapshot exists?
                  snap = self._get_report_db().get("snapshots", {}).get(period)
                  if not snap:
                      await ctx.send("ℹ️ Henüz bir başlangıç noktası yok. Şimdi oluşturuluyor...")
-                     self._take_snapshot(period)
+                     await self._take_snapshot(period)
                  return
 
              embed = self._create_report_embed(deltas, period, preview=True)
              await ctx.send(embed=embed)
              
         elif action == "init":
-             self._take_snapshot(period)
+             await self._take_snapshot(period)
              await ctx.send(f"📸 {period.capitalize()} için başlangıç snapshot'ı alındı.")
     
     @commands.command(name='export_report')
@@ -2873,7 +2831,7 @@ class SquadPlayers(commands.Cog):
         await ctx.send(f"📊 {period.capitalize()} raporu {format} olarak hazırlanıyor...")
         
         try:
-            deltas = self._calculate_deltas(period)
+            deltas = await self._calculate_deltas(period)
             
             if not deltas:
                 await ctx.send(f"⚠️ {period.capitalize()} için veri bulunamadı.")
@@ -3088,135 +3046,135 @@ class SquadPlayers(commands.Cog):
 
     # ========== GOOGLE SHEETS ACTIVITY PANEL (NEW) ==========
 
-ACTIVITY_SHEET_ID = '1GAmtAqOSOh5DplcufyqvKepcepgfo-ORsfWXThbP_s8'
+    ACTIVITY_SHEET_ID = '1GAmtAqOSOh5DplcufyqvKepcepgfo-ORsfWXThbP_s8'
 
-async def fetch_activity_from_sheets(self, force=False):
-    """Fetch activity data from Google Sheets with smart G2 timestamp caching"""
-    try:
-        if not hasattr(self, 'gc') or not self.gc:
-            logger.warning("Google Sheets client not initialized")
+    async def fetch_activity_from_sheets(self, force=False):
+        """Fetch activity data from Google Sheets with smart G2 timestamp caching"""
+        try:
+            if not hasattr(self, 'gc') or not self.gc:
+                logger.warning("Google Sheets client not initialized")
+                return getattr(self, '_cached_activity_data', [])
+        
+            sheet = self.gc.open_by_key(ACTIVITY_SHEET_ID)
+            worksheet = sheet.get_worksheet(0)  # First sheet
+        
+            # Check G2 for last update timestamp
+            last_update_cell = worksheet.acell('G2').value
+        
+            # Compare with cached timestamp
+            cached_timestamp = getattr(self, '_last_sheet_update', None)
+        
+            if not force and cached_timestamp == last_update_cell:
+                logger.info(f"Sheet data unchanged (G2: {last_update_cell})")
+                return getattr(self, '_cached_activity_data', [])
+        
+            # Fetch fresh data
+            all_values = worksheet.get_all_values()[1:]  # Skip header
+        
+            activity_data = []
+            for row in all_values:
+                if len(row) >= 1 and row[0]:  # Has name
+                    activity_data.append({
+                        'name': row[0],
+                        'steam_id': row[1] if len(row) > 1 else '',
+                        'playtime_2weeks': self._parse_playtime(row[2]) if len(row) > 2 else 0,
+                        'leave_status': row[3] if len(row) > 3 else 'Aktif'
+                    })
+        
+            # Cache data and timestamp
+            self._cached_activity_data = activity_data
+            self._last_sheet_update = last_update_cell
+        
+            logger.info(f"Sheet data updated (G2: {last_update_cell}, {len(activity_data)} players)")
+            return activity_data
+        
+        except Exception as e:
+            logger.error(f"Sheets fetch error: {e}", exc_info=True)
             return getattr(self, '_cached_activity_data', [])
-        
-        sheet = self.gc.open_by_key(ACTIVITY_SHEET_ID)
-        worksheet = sheet.get_worksheet(0)  # First sheet
-        
-        # Check G2 for last update timestamp
-        last_update_cell = worksheet.acell('G2').value
-        
-        # Compare with cached timestamp
-        cached_timestamp = getattr(self, '_last_sheet_update', None)
-        
-        if not force and cached_timestamp == last_update_cell:
-            logger.info(f"Sheet data unchanged (G2: {last_update_cell})")
-            return getattr(self, '_cached_activity_data', [])
-        
-        # Fetch fresh data
-        all_values = worksheet.get_all_values()[1:]  # Skip header
-        
-        activity_data = []
-        for row in all_values:
-            if len(row) >= 1 and row[0]:  # Has name
-                activity_data.append({
-                    'name': row[0],
-                    'steam_id': row[1] if len(row) > 1 else '',
-                    'playtime_2weeks': self._parse_playtime(row[2]) if len(row) > 2 else 0,
-                    'leave_status': row[3] if len(row) > 3 else 'Aktif'
-                })
-        
-        # Cache data and timestamp
-        self._cached_activity_data = activity_data
-        self._last_sheet_update = last_update_cell
-        
-        logger.info(f"Sheet data updated (G2: {last_update_cell}, {len(activity_data)} players)")
-        return activity_data
-        
-    except Exception as e:
-        logger.error(f"Sheets fetch error: {e}", exc_info=True)
-        return getattr(self, '_cached_activity_data', [])
 
-def _parse_playtime(self, value):
-    """Convert sheet playtime value to minutes"""
-    if not value:
+    def _parse_playtime(self, value):
+        """Convert sheet playtime value to minutes"""
+        if not value:
+            return 0
+    
+        try:
+            # Try direct number (minutes)
+            return int(float(value))
+        except:
+            # Try formats like "2828 dk" or "47 saat" or "47.2"
+            value_str = str(value).lower().replace(',', '.')
+        
+            if 'saat' in value_str or 'hour' in value_str:
+                # Extract number and convert hours to minutes
+                num = float(''.join(c for c in value_str if c.isdigit() or c == '.'))
+                return int(num * 60)
+            elif 'dk' in value_str or 'min' in value_str:
+                # Extract minutes
+                num = float(''.join(c for c in value_str if c.isdigit() or c == '.'))
+                return int(num)
+            else:
+                # Try as raw number
+                num = float(''.join(c for c in value_str if c.isdigit() or c == '.'))
+                return int(num)
+    
         return 0
-    
-    try:
-        # Try direct number (minutes)
-        return int(float(value))
-    except:
-        # Try formats like "2828 dk" or "47 saat" or "47.2"
-        value_str = str(value).lower().replace(',', '.')
-        
-        if 'saat' in value_str or 'hour' in value_str:
-            # Extract number and convert hours to minutes
-            num = float(''.join(c for c in value_str if c.isdigit() or c == '.'))
-            return int(num * 60)
-        elif 'dk' in value_str or 'min' in value_str:
-            # Extract minutes
-            num = float(''.join(c for c in value_str if c.isdigit() or c == '.'))
-            return int(num)
-        else:
-            # Try as raw number
-            num = float(''.join(c for c in value_str if c.isdigit() or c == '.'))
-            return int(num)
-    
-    return 0
 
-async def generate_activity_panel_sheets(self, activity_data):
-    """Generate activity panel embed from Sheets data"""
+    async def generate_activity_panel_sheets(self, activity_data):
+        """Generate activity panel embed from Sheets data"""
     
-    # Separate active vs on-leave players
-    on_leave_keywords = ['izinli', 'izin', 'izinde', 'leave']
-    active_players = [p for p in activity_data if p['leave_status'].lower() not in on_leave_keywords]
-    on_leave = [p for p in activity_data if p['leave_status'].lower() in on_leave_keywords]
+        # Separate active vs on-leave players
+        on_leave_keywords = ['izinli', 'izin', 'izinde', 'leave']
+        active_players = [p for p in activity_data if p['leave_status'].lower() not in on_leave_keywords]
+        on_leave = [p for p in activity_data if p['leave_status'].lower() in on_leave_keywords]
     
-    # Sort by playtime (descending)
-    active_players.sort(key=lambda x: x['playtime_2weeks'], reverse=True)
+        # Sort by playtime (descending)
+        active_players.sort(key=lambda x: x['playtime_2weeks'], reverse=True)
     
-    embed = discord.Embed(
-        title="🎮 AKTİFLİK SIRALAMASI",
-        description="**Son 2 Hafta** • Google Sheets verilerine göre",
-        color=discord.Color.blue(),
-        timestamp=datetime.datetime.now()
-    )
+        embed = discord.Embed(
+            title="🎮 AKTİFLİK SIRALAMASI",
+            description="**Son 2 Hafta** • Google Sheets verilerine göre",
+            color=discord.Color.blue(),
+            timestamp=datetime.datetime.now()
+        )
     
-    # Top 10 ranking
-    top_10_text = ""
-    medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
+        # Top 10 ranking
+        top_10_text = ""
+        medals = ["🥇", "🥈", "🥉", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"]
     
-    for i, player in enumerate(active_players[:10]):
-        hours = player['playtime_2weeks'] / 60
-        medal = medals[i] if i < len(medals) else f"{i+1}."
-        top_10_text += f"{medal} **{player['name']}** - {hours:.1f} saat\n"
+        for i, player in enumerate(active_players[:10]):
+            hours = player['playtime_2weeks'] / 60
+            medal = medals[i] if i < len(medals) else f"{i+1}."
+            top_10_text += f"{medal} **{player['name']}** - {hours:.1f} saat\n"
     
-    if not top_10_text:
-        top_10_text = "Veri bulunamadı"
+        if not top_10_text:
+            top_10_text = "Veri bulunamadı"
     
-    embed.add_field(name="━━━━━━━━━━━━━━━━━━━━━━━━", value=top_10_text, inline=False)
+        embed.add_field(name="━━━━━━━━━━━━━━━━━━━━━━━━", value=top_10_text, inline=False)
     
-    # Statistics
-    total_active = len(active_players)
-    avg_time = sum(p['playtime_2weeks'] for p in active_players) / total_active if total_active > 0 else 0
-    top_player = active_players[0] if active_players else None
+        # Statistics
+        total_active = len(active_players)
+        avg_time = sum(p['playtime_2weeks'] for p in active_players) / total_active if total_active > 0 else 0
+        top_player = active_players[0] if active_players else None
     
-    stats_text = f"📊 **Toplam Aktif:** {total_active} oyuncu\n"
-    stats_text += f"⏱️ **Ortalama:** {avg_time/60:.1f} saat\n"
-    if top_player:
-        stats_text += f"🏆 **En Aktif:** {top_player['name']} ({top_player['playtime_2weeks']/60:.1f} saat)"
+        stats_text = f"📊 **Toplam Aktif:** {total_active} oyuncu\n"
+        stats_text += f"⏱️ **Ortalama:** {avg_time/60:.1f} saat\n"
+        if top_player:
+            stats_text += f"🏆 **En Aktif:** {top_player['name']} ({top_player['playtime_2weeks']/60:.1f} saat)"
     
-    embed.add_field(name="📈 İstatistikler", value=stats_text, inline=False)
+        embed.add_field(name="📈 İstatistikler", value=stats_text, inline=False)
     
-    # On-leave players
-    if on_leave:
-        leave_text = "\n".join([f"• {p['name']}" for p in on_leave[:10]])
-        if len(on_leave) > 10:
-            leave_text += f"\n... ve {len(on_leave) - 10} oyuncu daha"
-        embed.add_field(name=f"🌴 İzinli Oyuncular ({len(on_leave)})", value=leave_text, inline=False)
+        # On-leave players
+        if on_leave:
+            leave_text = "\n".join([f"• {p['name']}" for p in on_leave[:10]])
+            if len(on_leave) > 10:
+                leave_text += f"\n... ve {len(on_leave) - 10} oyuncu daha"
+            embed.add_field(name=f"🌴 İzinli Oyuncular ({len(on_leave)})", value=leave_text, inline=False)
     
-    # Update timestamp from G2
-    last_update = getattr(self, '_last_sheet_update', 'Bilinmiyor')
-    embed.set_footer(text=f"Veri Kaynağı: Google Sheets • Son Güncelleme: {last_update}")
+        # Update timestamp from G2
+        last_update = getattr(self, '_last_sheet_update', 'Bilinmiyor')
+        embed.set_footer(text=f"Veri Kaynağı: Google Sheets • Son Güncelleme: {last_update}")
     
-    return embed
+        return embed
 
     async def generate_activity_panel_internal(self):
         """Generate activity panel from internal tracking data (hybrid mode)"""
@@ -3254,39 +3212,42 @@ async def generate_activity_panel_sheets(self, activity_data):
                         "monthly": monthly
                     })
         else:
-            # New SQLite mode
+            # New SQLite mode (Optimized)
             from datetime import date, timedelta
             today_d = date.today()
             week_ago = today_d - timedelta(days=7)
             month_ago = today_d - timedelta(days=30)
             
-            # Get all players
-            all_players = await self.db.get_all_players()
+            # Use optimized bulk fetch query
+            # Returns list of (ActivityLog, Player)
+            all_logs_with_player = await self.db.get_all_recent_activity(days=30)
             
-            for player in all_players:
-                # Get activity for last 30 days
-                activity_logs = await self.db.get_player_activity(player.id, days=30)
-                
-                daily = 0
-                weekly = 0
-                monthly = 0
-                
-                for log in activity_logs:
-                    if log.date == today_d:
-                        daily += log.minutes
-                    if log.date >= week_ago:
-                        weekly += log.minutes
-                    if log.date >= month_ago:
-                        monthly += log.minutes
-                
-                # Only include players with activity
-                if monthly > 0:
-                    stats.append({
+            # Aggregate in memory
+            # Map: player_id -> {name, daily, weekly, monthly}
+            player_stats = {}
+            
+            for log, player in all_logs_with_player:
+                pid = player.id
+                if pid not in player_stats:
+                    player_stats[pid] = {
                         "name": player.name,
-                        "daily": daily,
-                        "weekly": weekly,
-                        "monthly": monthly
-                    })
+                        "daily": 0,
+                        "weekly": 0,
+                        "monthly": 0
+                    }
+                
+                # Monthly (everything returned is within 30 days)
+                player_stats[pid]["monthly"] += log.minutes
+                
+                # Weekly
+                if log.date >= week_ago:
+                    player_stats[pid]["weekly"] += log.minutes
+                    
+                # Daily
+                if log.date == today_d:
+                    player_stats[pid]["daily"] += log.minutes
+            
+            stats = list(player_stats.values())
         
         # Sort by weekly playtime
         stats.sort(key=lambda x: x["weekly"], reverse=True)
@@ -3297,42 +3258,53 @@ async def generate_activity_panel_sheets(self, activity_data):
     @commands.command(name='aktiflik_panel', aliases=['squad_activity'])
     async def aktiflik_panel(self, ctx, channel: discord.TextChannel = None):
         """Internal tracking tabanlı aktiflik paneli kurar."""
+        # DEBUG: Confirm command triggering
+        await ctx.send("🛠️ Komut tetiklendi, izinler kontrol ediliyor...")
         if not await self.check_permissions(ctx): return
         
-        target = channel or ctx.channel
-        cfg = self.load_activity_panel_config()
-        
-        # Clean old panel
-        if str(ctx.guild.id) in cfg:
-            old_ch = cfg[str(ctx.guild.id)].get("channel_id")
-            old_msg = cfg[str(ctx.guild.id)].get("message_id")
-            try:
-                ch = ctx.guild.get_channel(old_ch)
-                if ch and old_msg:
-                    msg = await ch.fetch_message(old_msg)
-                    await msg.delete()
-                    logger.info(f"Deleted old activity panel message {old_msg}")
-            except Exception as e:
-                logger.warning(f"Could not delete old panel: {e}")
-        
-        await ctx.send(f"✅ Aktiflik paneli {target.mention} kanalına kuruldu.")
+        status_msg = await ctx.send("🔄 **Aktiflik verileri işleniyor...**")
         
         try:
+            target = channel or ctx.channel
+            cfg = self.load_activity_panel_config()
+        
+            # Clean old panel
+            if str(ctx.guild.id) in cfg:
+                old_ch = cfg[str(ctx.guild.id)].get("channel_id")
+                old_msg = cfg[str(ctx.guild.id)].get("message_id")
+                try:
+                    ch = ctx.guild.get_channel(old_ch)
+                    if ch and old_msg:
+                        msg = await ch.fetch_message(old_msg)
+                        await msg.delete()
+                        logger.info(f"Deleted old activity panel message {old_msg}")
+                except Exception as e:
+                    logger.warning(f"Could not delete old panel: {e}")
+            
             # Generate stats from internal tracking
             stats = await self.generate_activity_panel_internal()
             
-            # Generate image
-            image_buf = generate_activity_image(stats)
+            # Check dependency
+            if not HAS_MATPLOTLIB:
+                await status_msg.edit(content="⚠️ **Uyarı:** Grafik motoru (Maplotlib) yüklü değil. Panel metin modunda çalışacak.")
+                file = None
+                img_url = None
+            else:
+                # Generate image
+                image_buf = generate_activity_image(stats)
+                file = discord.File(image_buf, filename="activity_panel.png")
+                img_url = "attachment://activity_panel.png"
             
             # Create embed with refresh button
-            file = discord.File(image_buf, filename="activity_panel.png")
             embed = discord.Embed(
                 title="🏆 SQUAD SUNUCU AKTİFLİK",
-                description="📊 Sunucu içi aktivite (Bot tracking)",
+                description="📊 Sunucu içi aktivite (Bot tracking)" + ("\n⚠️ Grafik modülü eksik." if not HAS_MATPLOTLIB else ""),
                 color=discord.Color.gold()
             )
-            embed.set_image(url="attachment://activity_panel.png")
-            embed.set_footer(text=f"Son Güncelleme: {datetime.datetime.now().strftime('%H:%M')} | Internal Tracking | Otomatik: Her dakika")
+            if img_url:
+                embed.set_image(url=img_url)
+            mode_str = "JSON" if self.json_mode else "SQLite"
+            embed.set_footer(text=f"Son Güncelleme: {datetime.datetime.now().strftime('%H:%M')} | Mod: {mode_str} | Otomatik: Her 2 dk")
             
             # Refresh button view
             view = ActivityRefreshView(self, ctx.guild.id)
@@ -3342,8 +3314,14 @@ async def generate_activity_panel_sheets(self, activity_data):
             cfg[str(ctx.guild.id)] = {"channel_id": target.id, "message_id": panel_msg.id}
             self.save_activity_panel_config(cfg)
             
+            await status_msg.edit(content=f"✅ **Aktiflik paneli {target.mention} kanalına kuruldu.**")
+            
+            # Start loop if not running
+            if not self.activity_panel_loop.is_running():
+                self.activity_panel_loop.start()
+            
         except Exception as e:
-            await ctx.send(f"❌ Panel oluşturulurken hata: {e}")
+            await status_msg.edit(content=f"❌ **Panel oluşturulurken hata:** {e}")
             logger.error(f"Activity panel error: {e}", exc_info=True)
 
     @commands.command(name='aktiflik_yonet')
@@ -3381,21 +3359,31 @@ class ActivityRefreshView(discord.ui.View):
             # Generate fresh stats from internal tracking
             stats = await self.cog.generate_activity_panel_internal()
             
-            # Generate new image
-            image_buf = generate_activity_image(stats)
+            # Check dependency
+            if not HAS_MATPLOTLIB:
+                file = None
+                img_url = None
+                attachments_list = []
+            else:
+                # Generate new image
+                image_buf = generate_activity_image(stats)
+                file = discord.File(image_buf, filename="activity_panel.png")
+                img_url = "attachment://activity_panel.png"
+                attachments_list = [file]
             
             # Update panel
-            file = discord.File(image_buf, filename="activity_panel.png")
             embed = discord.Embed(
                 title="🏆 SQUAD SUNUCU AKTİFLİK",
-                description="📊 Sunucu içi aktivite (Bot tracking)",
+                description="📊 Sunucu içi aktivite (Bot tracking)" + ("\n⚠️ Grafik modülü eksik." if not HAS_MATPLOTLIB else ""),
                 color=discord.Color.gold()
             )
-            embed.set_image(url="attachment://activity_panel.png")
-            embed.set_footer(text=f"Son Güncelleme: {datetime.datetime.now().strftime('%H:%M')} | Internal Tracking | Otomatik: Her dakika")
+            if img_url:
+                embed.set_image(url=img_url)
+            mode_str = "JSON" if self.cog.json_mode else "SQLite"
+            embed.set_footer(text=f"Son Güncelleme: {datetime.datetime.now().strftime('%H:%M')} | Mod: {mode_str} | Otomatik: Her 2 dk")
             
             # Edit message with new data
-            await interaction.message.edit(embed=embed, attachments=[file], view=self)
+            await interaction.message.edit(embed=embed, attachments=attachments_list, view=self)
             
             await interaction.followup.send("✅ Panel güncellendi!", ephemeral=True)
             
@@ -3405,4 +3393,13 @@ class ActivityRefreshView(discord.ui.View):
 
 
 async def setup(bot):
-    await bot.add_cog(SquadPlayers(bot))
+    cog = SquadPlayers(bot)
+    await bot.add_cog(cog)
+    
+    # DEBUG: Log registered commands
+    cmds = [c.name for c in cog.get_commands()]
+    logger.info(f"SquadPlayers Loaded Commands: {cmds}")
+    if 'aktiflik_panel' not in cmds:
+        logger.error("CRITICAL: aktiflik_panel command NOT registered!")
+    else:
+        logger.info("CONFIRMED: aktiflik_panel is registered.")
